@@ -1,0 +1,427 @@
+name: Terraform Apply - Environment Promotion
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+      - release/**
+  pull_request:
+    types: [closed]
+    branches:
+      - main
+      - develop
+
+env:
+  TERRAFORM_VERSION: '1.6.6'
+  AWS_REGION: 'us-east-1'
+
+# Concurrency control - prevent multiple applies to same environment
+concurrency:
+  group: terraform-${{ github.ref_name }}-${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+  deployments: write
+  statuses: write
+
+jobs:
+  # Job 1: Determine which environment to deploy to
+  determine-environment:
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.set-env.outputs.environment }}
+      aws_account_id: ${{ steps.set-env.outputs.aws_account_id }}
+      requires_approval: ${{ steps.set-env.outputs.requires_approval }}
+      target_branch: ${{ steps.set-env.outputs.target_branch }}
+    steps:
+      - name: Determine target environment
+        id: set-env
+        run: |
+          BRANCH_NAME="${GITHUB_REF_NAME}"
+          
+          if [[ "$BRANCH_NAME" == "develop" ]]; then
+            echo "environment=dev" >> $GITHUB_OUTPUT
+            echo "aws_account_id=${{ secrets.DEV_AWS_ACCOUNT_ID }}" >> $GITHUB_OUTPUT
+            echo "requires_approval=false" >> $GITHUB_OUTPUT
+            echo "target_branch=develop" >> $GITHUB_OUTPUT
+            echo "✅ Deploying to DEV environment (auto-approve)"
+          elif [[ "$BRANCH_NAME" == "main" ]]; then
+            echo "environment=prod" >> $GITHUB_OUTPUT
+            echo "aws_account_id=${{ secrets.PROD_AWS_ACCOUNT_ID }}" >> $GITHUB_OUTPUT
+            echo "requires_approval=true" >> $GITHUB_OUTPUT
+            echo "target_branch=main" >> $GITHUB_OUTPUT
+            echo "⚠️  Deploying to PRODUCTION environment (requires approval)"
+          elif [[ "$BRANCH_NAME" =~ ^release/ ]]; then
+            echo "environment=staging" >> $GITHUB_OUTPUT
+            echo "aws_account_id=${{ secrets.STAGING_AWS_ACCOUNT_ID }}" >> $GITHUB_OUTPUT
+            echo "requires_approval=true" >> $GITHUB_OUTPUT
+            echo "target_branch=${BRANCH_NAME}" >> $GITHUB_OUTPUT
+            echo "⚠️  Deploying to STAGING environment (requires approval)"
+          else
+            echo "❌ Branch $BRANCH_NAME not configured for automatic deployment"
+            exit 1
+          fi
+
+  # Job 2: Terraform Plan
+  terraform-plan:
+    needs: determine-environment
+    runs-on: ubuntu-latest
+    environment: 
+      name: ${{ needs.determine-environment.outputs.environment }}
+    outputs:
+      plan_exitcode: ${{ steps.plan.outputs.exitcode }}
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+      plan_output: ${{ steps.plan-summary.outputs.plan_summary }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: github-actions-terraform
+
+      - name: Terraform Init
+        id: init
+        working-directory: terraform/environments/${{ needs.determine-environment.outputs.environment }}
+        run: |
+          terraform init -backend=true -reconfigure
+        env:
+          TF_VAR_environment: ${{ needs.determine-environment.outputs.environment }}
+
+      - name: Terraform Workspace Select
+        working-directory: terraform/environments/${{ needs.determine-environment.outputs.environment }}
+        run: |
+          terraform workspace select ${{ needs.determine-environment.outputs.environment }} || terraform workspace new ${{ needs.determine-environment.outputs.environment }}
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: terraform/environments/${{ needs.determine-environment.outputs.environment }}
+        run: |
+          terraform plan -no-color -detailed-exitcode -out=tfplan
+          exitcode=$?
+          
+          echo "exitcode=$exitcode" >> $GITHUB_OUTPUT
+          
+          if [ $exitcode -eq 2 ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "✅ Plan has changes to apply"
+          elif [ $exitcode -eq 1 ]; then
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "❌ Plan failed with error"
+            exit 1
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "ℹ️ No changes needed"
+          fi
+          
+          mv tfplan /tmp/tfplan_${{ needs.determine-environment.outputs.environment }}
+          
+      - name: Generate Plan Summary
+        id: plan-summary
+        if: steps.plan.outputs.has_changes == 'true'
+        working-directory: terraform/environments/${{ needs.determine-environment.outputs.environment }}
+        run: |
+          PLAN_SUMMARY=$(terraform show -no-color /tmp/tfplan_${{ needs.determine-environment.outputs.environment }} | head -200 || echo "No plan details available")
+          PLAN_SUMMARY="${PLAN_SUMMARY//'%'/'%25'}"
+          PLAN_SUMMARY="${PLAN_SUMMARY//$'\n'/'%0A'}"
+          PLAN_SUMMARY="${PLAN_SUMMARY//$'\r'/'%0D'}"
+          echo "plan_summary=$PLAN_SUMMARY" >> $GITHUB_OUTPUT
+          
+      - name: Upload Terraform Plan
+        uses: actions/upload-artifact@v4
+        if: steps.plan.outputs.has_changes == 'true'
+        with:
+          name: tfplan-${{ needs.determine-environment.outputs.environment }}
+          path: /tmp/tfplan_${{ needs.determine-environment.outputs.environment }}
+          retention-days: 7
+
+  # Job 3: Manual Approval Gate (for staging/prod)
+  manual-approval:
+    needs: [determine-environment, terraform-plan]
+    if: needs.determine-environment.outputs.requires_approval == 'true' && needs.terraform-plan.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ needs.determine-environment.outputs.environment }}
+      url: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Create GitHub Environment Approval
+        run: |
+          echo "Waiting for approval in GitHub Environments..."
+          echo "Environment: ${{ needs.determine-environment.outputs.environment }}"
+          echo "Approval required before proceeding"
+          
+      - name: Post PR Comment for Approval
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const planOutput = process.env.PLAN_OUTPUT || 'No plan details available';
+            const environmentName = '${{ needs.determine-environment.outputs.environment }}';
+            const branchName = '${{ github.ref_name }}';
+            const commitSha = '${{ github.sha }}';
+            const serverUrl = '${{ github.server_url }}';
+            const repository = '${{ github.repository }}';
+            
+            const commentBody = '## 🚀 Terraform Apply Approval Required\n\n' +
+              '**Environment:** `' + environmentName + '`\n' +
+              '**Branch:** `' + branchName + '`\n' +
+              '**Commit:** `' + commitSha + '`\n\n' +
+              '### Plan Summary\n' +
+              '```terraform\n' +
+              planOutput.substring(0, 1000) + '\n' +
+              '```\n\n' +
+              'Please approve or reject this deployment in the [GitHub Environments tab](' + 
+              serverUrl + '/' + repository + '/environments)';
+            
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: commentBody
+            });
+        env:
+          PLAN_OUTPUT: ${{ needs.terraform-plan.outputs.plan_output }}
+
+  # Job 4: Terraform Apply
+  terraform-apply:
+    needs: [determine-environment, terraform-plan, manual-approval]
+    if: |
+      (needs.determine-environment.outputs.requires_approval == 'false' && 
+       needs.terraform-plan.outputs.has_changes == 'true') ||
+      (needs.determine-environment.outputs.requires_approval == 'true' && 
+       needs.terraform-plan.outputs.has_changes == 'true' &&
+       needs.manual-approval.result == 'success')
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ needs.determine-environment.outputs.environment }}
+      url: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: github-actions-terraform-apply
+
+      - name: Download Terraform Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ needs.determine-environment.outputs.environment }}
+          path: /tmp
+
+      - name: Terraform Init
+        working-directory: terraform/environments/${{ needs.determine-environment.outputs.environment }}
+        run: |
+          terraform init -backend=true -reconfigure
+        env:
+          TF_VAR_environment: ${{ needs.determine-environment.outputs.environment }}
+
+      - name: Terraform Workspace Select
+        working-directory: terraform/environments/${{ needs.determine-environment.outputs.environment }}
+        run: |
+          terraform workspace select ${{ needs.determine-environment.outputs.environment }} || terraform workspace new ${{ needs.determine-environment.outputs.environment }}
+
+      - name: Terraform Apply
+        id: apply
+        working-directory: terraform/environments/${{ needs.determine-environment.outputs.environment }}
+        run: |
+          terraform apply /tmp/tfplan_${{ needs.determine-environment.outputs.environment }}
+          terraform output -json > tf_outputs.json
+          echo "apply_timestamp=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
+          
+      - name: Post-Apply Validation
+        working-directory: terraform/environments/${{ needs.determine-environment.outputs.environment }}
+        run: |
+          echo "✅ Terraform apply completed successfully"
+          echo "=== Critical Resources Deployed ==="
+          terraform state list | grep -E "aws_eks_cluster|aws_rds_cluster|aws_elasticache_cluster|aws_docdb_cluster" || echo "No critical resources found in state"
+          
+      - name: Upload Terraform Outputs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: terraform-outputs-${{ needs.determine-environment.outputs.environment }}
+          path: terraform/environments/${{ needs.determine-environment.outputs.environment }}/tf_outputs.json
+          retention-days: 30
+
+  # Job 5: Deployment Notification
+  notify-deployment:
+    needs: [determine-environment, terraform-apply]
+    if: always() && (needs.terraform-apply.result == 'success' || needs.terraform-apply.result == 'failure' || needs.terraform-apply.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine deployment status
+        id: status
+        run: |
+          if [[ "${{ needs.terraform-apply.result }}" == "success" ]]; then
+            echo "status=✅ SUCCESS" >> $GITHUB_OUTPUT
+            echo "color=success" >> $GITHUB_OUTPUT
+            echo "emoji=🎉" >> $GITHUB_OUTPUT
+          elif [[ "${{ needs.terraform-apply.result }}" == "skipped" ]]; then
+            echo "status=⏭️ SKIPPED" >> $GITHUB_OUTPUT
+            echo "color=neutral" >> $GITHUB_OUTPUT
+            echo "emoji=⏭️" >> $GITHUB_OUTPUT
+          else
+            echo "status=❌ FAILED" >> $GITHUB_OUTPUT
+            echo "color=failure" >> $GITHUB_OUTPUT
+            echo "emoji=💥" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub Deployment Status
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const statusMap = {
+              '✅ SUCCESS': 'success',
+              '⏭️ SKIPPED': 'neutral',
+              '❌ FAILED': 'failure'
+            };
+            
+            const statusText = '${{ steps.status.outputs.status }}'.trim();
+            const deploymentStatus = statusMap[statusText] || 'neutral';
+            
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.sha,
+              state: deploymentStatus,
+              context: 'Terraform Apply / ${{ needs.determine-environment.outputs.environment }}',
+              description: 'Deployment to ${{ needs.determine-environment.outputs.environment }} ${{ steps.status.outputs.status }}',
+              target_url: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+            });
+
+      - name: Post Deployment Comment
+        if: needs.terraform-apply.result == 'success' || needs.terraform-apply.result == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const status = '${{ steps.status.outputs.status }}';
+            const emoji = '${{ steps.status.outputs.emoji }}';
+            const environmentName = '${{ needs.determine-environment.outputs.environment }}';
+            const branchName = '${{ github.ref_name }}';
+            const commitSha = '${{ github.sha }}';
+            const actor = '${{ github.actor }}';
+            const runUrl = '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}';
+            
+            let commentBody = '## ' + emoji + ' Terraform Deployment ' + status + '\n\n';
+            commentBody += '**Environment:** `' + environmentName + '`\n';
+            commentBody += '**Branch:** `' + branchName + '`\n';
+            commentBody += '**Commit:** `' + commitSha + '`\n';
+            commentBody += '**Started by:** @' + actor + '\n\n';
+            commentBody += '[View Workflow Run](' + runUrl + ')';
+            
+            try {
+              const prNumber = context.payload.pull_request?.number || 
+                              (context.payload.issue?.number);
+              
+              if (prNumber) {
+                await github.rest.issues.createComment({
+                  issue_number: prNumber,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  body: commentBody
+                });
+              }
+            } catch (error) {
+              console.log('Could not post PR comment:', error.message);
+            }
+
+  # Job 6: Automatic Rollback (Prod only on failure)
+  rollback-on-failure:
+    needs: [determine-environment, terraform-apply, notify-deployment]
+    if: needs.terraform-apply.result == 'failure' && needs.determine-environment.outputs.environment == 'prod'
+    runs-on: ubuntu-latest
+    environment:
+      name: rollback-${{ needs.determine-environment.outputs.environment }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.before || github.ref }}
+          fetch-depth: 0
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: github-actions-terraform-rollback
+
+      - name: Terraform Init for Rollback
+        working-directory: terraform/environments/prod
+        run: |
+          terraform init -backend=true -reconfigure
+        env:
+          TF_VAR_environment: prod
+
+      - name: Terraform Workspace Select
+        working-directory: terraform/environments/prod
+        run: |
+          terraform workspace select prod || terraform workspace new prod
+
+      - name: Rollback to Previous Version
+        working-directory: terraform/environments/prod
+        run: |
+          echo "⚠️  Initiating automatic rollback for PRODUCTION environment"
+          PREVIOUS_COMMIT="${{ github.event.before }}"
+          echo "Rolling back to commit: $PREVIOUS_COMMIT"
+          git stash
+          git checkout $PREVIOUS_COMMIT -- terraform/environments/prod/
+          terraform apply -auto-approve
+          echo "✅ Rollback completed successfully"
+          
+      - name: Notify Rollback
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const rollbackMessage = '## 🔄 AUTO-ROLLBACK Executed\n\n' +
+              '**Environment:** `PRODUCTION`\n' +
+              '**Status:** Rollback completed\n' +
+              '**Previous Commit:** `${{ github.event.before }}`\n' +
+              '**Failed Commit:** `${{ github.sha }}`\n\n' +
+              'The system has been automatically rolled back to the previous working state.\n\n' +
+              '**Action Required:** Please investigate the failure in the [original workflow](' +
+              '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) before retrying.';
+            
+            try {
+              const prNumber = context.payload.pull_request?.number;
+              if (prNumber) {
+                await github.rest.issues.createComment({
+                  issue_number: prNumber,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  body: rollbackMessage
+                });
+              }
+            } catch (error) {
+              console.log('Could not post rollback comment:', error.message);
+            }
