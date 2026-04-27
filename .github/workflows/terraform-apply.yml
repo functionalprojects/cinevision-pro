@@ -1,4 +1,4 @@
-name: Terraform Apply - AWS Environment Promotion
+name: Terraform Apply - Environment Promotion
 
 on:
   push:
@@ -16,7 +16,7 @@ env:
   TERRAFORM_VERSION: '1.6.6'
   AWS_REGION: 'us-east-1'
 
-# Concurrency control - prevent multiple applies to same AWS environment
+# Concurrency control - prevent multiple applies to same environment
 concurrency:
   group: terraform-${{ github.ref_name }}-${{ github.workflow }}
   cancel-in-progress: false
@@ -29,19 +29,18 @@ permissions:
   statuses: write
 
 jobs:
-  # Job 1: Determine AWS Environment Configuration
+  # Job 1: Determine which environment to deploy to
   determine-environment:
     runs-on: ubuntu-latest
     outputs:
       environment: ${{ steps.set-env.outputs.environment }}
       aws_account_id: ${{ steps.set-env.outputs.aws_account_id }}
-      aws_role_arn: ${{ steps.set-env.outputs.aws_role_arn }}
+      aws_role_name: ${{ steps.set-env.outputs.aws_role_name }}
       requires_approval: ${{ steps.set-env.outputs.requires_approval }}
       target_branch: ${{ steps.set-env.outputs.target_branch }}
       terraform_workspace: ${{ steps.set-env.outputs.terraform_workspace }}
-      aws_region: ${{ steps.set-env.outputs.aws_region }}
     steps:
-      - name: Configure AWS Environment
+      - name: Determine target environment
         id: set-env
         run: |
           BRANCH_NAME="${GITHUB_REF_NAME}"
@@ -49,43 +48,38 @@ jobs:
           if [[ "$BRANCH_NAME" == "develop" ]]; then
             echo "environment=dev" >> $GITHUB_OUTPUT
             echo "aws_account_id=${{ secrets.DEV_AWS_ACCOUNT_ID }}" >> $GITHUB_OUTPUT
-            echo "aws_role_arn=arn:aws:iam::${{ secrets.DEV_AWS_ACCOUNT_ID }}:role/terraform-github-actions" >> $GITHUB_OUTPUT
+            echo "aws_role_name=terraform-github-actions-dev" >> $GITHUB_OUTPUT
             echo "requires_approval=false" >> $GITHUB_OUTPUT
             echo "target_branch=develop" >> $GITHUB_OUTPUT
             echo "terraform_workspace=dev" >> $GITHUB_OUTPUT
-            echo "aws_region=us-east-1" >> $GITHUB_OUTPUT
-            echo "✅ Deploying to AWS DEV environment (auto-approve)"
-            
+            echo "✅ Deploying to DEV environment (auto-approve)"
           elif [[ "$BRANCH_NAME" == "main" ]]; then
             echo "environment=prod" >> $GITHUB_OUTPUT
             echo "aws_account_id=${{ secrets.PROD_AWS_ACCOUNT_ID }}" >> $GITHUB_OUTPUT
-            echo "aws_role_arn=arn:aws:iam::${{ secrets.PROD_AWS_ACCOUNT_ID }}:role/terraform-github-actions" >> $GITHUB_OUTPUT
+            echo "aws_role_name=terraform-github-actions-prod" >> $GITHUB_OUTPUT
             echo "requires_approval=true" >> $GITHUB_OUTPUT
             echo "target_branch=main" >> $GITHUB_OUTPUT
             echo "terraform_workspace=prod" >> $GITHUB_OUTPUT
-            echo "aws_region=us-east-1" >> $GITHUB_OUTPUT
-            echo "⚠️  Deploying to AWS PRODUCTION environment (requires approval)"
-            
+            echo "⚠️  Deploying to PRODUCTION environment (requires approval)"
           elif [[ "$BRANCH_NAME" =~ ^release/ ]]; then
             echo "environment=staging" >> $GITHUB_OUTPUT
             echo "aws_account_id=${{ secrets.STAGING_AWS_ACCOUNT_ID }}" >> $GITHUB_OUTPUT
-            echo "aws_role_arn=arn:aws:iam::${{ secrets.STAGING_AWS_ACCOUNT_ID }}:role/terraform-github-actions" >> $GITHUB_OUTPUT
+            echo "aws_role_name=terraform-github-actions-staging" >> $GITHUB_OUTPUT
             echo "requires_approval=true" >> $GITHUB_OUTPUT
             echo "target_branch=${BRANCH_NAME}" >> $GITHUB_OUTPUT
             echo "terraform_workspace=staging" >> $GITHUB_OUTPUT
-            echo "aws_region=us-east-1" >> $GITHUB_OUTPUT
-            echo "⚠️  Deploying to AWS STAGING environment (requires approval)"
+            echo "⚠️  Deploying to STAGING environment (requires approval)"
           else
             echo "❌ Branch $BRANCH_NAME not configured for automatic deployment"
             exit 1
           fi
 
-  # Job 2: Terraform Plan in AWS
+  # Job 2: Terraform Plan
   terraform-plan:
     needs: determine-environment
     runs-on: ubuntu-latest
     environment: 
-      name: aws-${{ needs.determine-environment.outputs.environment }}
+      name: ${{ needs.determine-environment.outputs.environment }}
     outputs:
       plan_exitcode: ${{ steps.plan.outputs.exitcode }}
       has_changes: ${{ steps.plan.outputs.has_changes }}
@@ -101,25 +95,24 @@ jobs:
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
           
-      - name: Configure AWS Credentials for Target Account
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ needs.determine-environment.outputs.aws_role_arn }}
-          aws-region: ${{ needs.determine-environment.outputs.aws_region }}
+          role-to-assume: arn:aws:iam::${{ needs.determine-environment.outputs.aws_account_id }}:role/${{ needs.determine-environment.outputs.aws_role_name }}
+          aws-region: ${{ env.AWS_REGION }}
           role-session-name: github-actions-terraform-plan
-          role-duration-seconds: 3600
 
-      - name: Terraform Init (AWS Backend)
+      - name: Terraform Init
         id: init
         working-directory: terraform/environments/${{ needs.determine-environment.outputs.environment }}
         run: |
-          # Backend config uses AWS account-specific S3 bucket
+          # Create backend config dynamically
           cat > backend.tf << EOF
           terraform {
             backend "s3" {
               bucket         = "${{ needs.determine-environment.outputs.aws_account_id }}-cinevision-terraform-state-${{ needs.determine-environment.outputs.environment }}"
-              key            = "terraform/${{ needs.determine-environment.outputs.environment }}/terraform.tfstate"
-              region         = "${{ needs.determine-environment.outputs.aws_region }}"
+              key            = "terraform/${{ needs.determine-environment.outputs.terraform_workspace }}/terraform.tfstate"
+              region         = "${{ env.AWS_REGION }}"
               dynamodb_table = "cinevision-terraform-locks-${{ needs.determine-environment.outputs.environment }}"
               encrypt        = true
             }
@@ -129,7 +122,6 @@ jobs:
           terraform init -backend=true -reconfigure
         env:
           TF_VAR_environment: ${{ needs.determine-environment.outputs.environment }}
-          TF_VAR_aws_region: ${{ needs.determine-environment.outputs.aws_region }}
 
       - name: Terraform Workspace Select
         working-directory: terraform/environments/${{ needs.determine-environment.outputs.environment }}
@@ -140,91 +132,86 @@ jobs:
         id: plan
         working-directory: terraform/environments/${{ needs.determine-environment.outputs.environment }}
         run: |
-          terraform plan \
-            -var-file="environments/${{ needs.determine-environment.outputs.environment }}/terraform.tfvars" \
-            -no-color \
-            -detailed-exitcode \
-            -out=tfplan
-          
+          terraform plan -no-color -detailed-exitcode -out=tfplan
           exitcode=$?
+          
           echo "exitcode=$exitcode" >> $GITHUB_OUTPUT
           
           if [ $exitcode -eq 2 ]; then
             echo "has_changes=true" >> $GITHUB_OUTPUT
-            echo "✅ Plan has changes to apply in AWS"
+            echo "✅ Plan has changes to apply"
           elif [ $exitcode -eq 1 ]; then
             echo "has_changes=false" >> $GITHUB_OUTPUT
             echo "❌ Plan failed with error"
             exit 1
           else
             echo "has_changes=false" >> $GITHUB_OUTPUT
-            echo "ℹ️ No changes needed for AWS infrastructure"
+            echo "ℹ️ No changes needed"
           fi
           
-          # Store plan for apply job
-          cp tfplan /tmp/tfplan
+          mv tfplan /tmp/tfplan_${{ needs.determine-environment.outputs.environment }}
           
       - name: Generate Plan Summary
         id: plan-summary
         if: steps.plan.outputs.has_changes == 'true'
         working-directory: terraform/environments/${{ needs.determine-environment.outputs.environment }}
         run: |
-          PLAN_SUMMARY=$(terraform show -no-color /tmp/tfplan | head -200 || echo "No plan details available")
+          PLAN_SUMMARY=$(terraform show -no-color /tmp/tfplan_${{ needs.determine-environment.outputs.environment }} | head -200 || echo "No plan details available")
           PLAN_SUMMARY="${PLAN_SUMMARY//'%'/'%25'}"
           PLAN_SUMMARY="${PLAN_SUMMARY//$'\n'/'%0A'}"
           PLAN_SUMMARY="${PLAN_SUMMARY//$'\r'/'%0D'}"
           echo "plan_summary=$PLAN_SUMMARY" >> $GITHUB_OUTPUT
           
-      - name: Upload Terraform Plan for AWS Apply
+      - name: Upload Terraform Plan
         uses: actions/upload-artifact@v4
         if: steps.plan.outputs.has_changes == 'true'
         with:
           name: tfplan-${{ needs.determine-environment.outputs.environment }}
-          path: /tmp/tfplan
+          path: /tmp/tfplan_${{ needs.determine-environment.outputs.environment }}
           retention-days: 7
 
-  # Job 3: Manual Approval Gate (for AWS staging/prod)
+  # Job 3: Manual Approval Gate (for staging/prod)
   manual-approval:
     needs: [determine-environment, terraform-plan]
     if: needs.determine-environment.outputs.requires_approval == 'true' && needs.terraform-plan.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
     environment:
-      name: aws-${{ needs.determine-environment.outputs.environment }}
+      name: ${{ needs.determine-environment.outputs.environment }}
       url: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
-      - name: AWS Environment Approval Required
+      - name: Create GitHub Environment Approval
         run: |
           echo "========================================="
           echo "⚠️  AWS ENVIRONMENT APPROVAL REQUIRED"
           echo "========================================="
           echo "Environment: ${{ needs.determine-environment.outputs.environment }}"
           echo "AWS Account: ${{ needs.determine-environment.outputs.aws_account_id }}"
-          echo "Region: ${{ needs.determine-environment.outputs.aws_region }}"
-          echo ""
+          echo "Role: ${{ needs.determine-environment.outputs.aws_role_name }}"
+          echo "========================================="
           echo "Waiting for manual approval in GitHub Environments..."
-          echo "Go to Actions -> Review Deployments"
+          echo "Go to Actions → Review Deployments"
           echo "========================================="
           
-      - name: Post PR Comment with AWS Plan Details
+      - name: Post PR Comment for Approval
         uses: actions/github-script@v7
         with:
           script: |
             const planOutput = process.env.PLAN_OUTPUT || 'No plan details available';
             const environmentName = '${{ needs.determine-environment.outputs.environment }}';
             const awsAccountId = '${{ needs.determine-environment.outputs.aws_account_id }}';
-            const awsRegion = '${{ needs.determine-environment.outputs.aws_region }}';
+            const awsRoleName = '${{ needs.determine-environment.outputs.aws_role_name }}';
             const branchName = '${{ github.ref_name }}';
             const commitSha = '${{ github.sha }}';
             const serverUrl = '${{ github.server_url }}';
             const repository = '${{ github.repository }}';
             
             const commentBody = '## 🚀 AWS Terraform Deployment Approval Required\n\n' +
-              '**AWS Environment:** `' + environmentName + '`\n' +
+              '**Environment:** `' + environmentName + '`\n' +
               '**AWS Account:** `' + awsAccountId + '`\n' +
-              '**AWS Region:** `' + awsRegion + '`\n' +
+              '**AWS Role:** `' + awsRoleName + '`\n' +
               '**Branch:** `' + branchName + '`\n' +
               '**Commit:** `' + commitSha + '`\n\n' +
-              '### Infrastructure Changes\n' +
+              '### Plan Summary\n' +
               '```terraform\n' +
               planOutput.substring(0, 1000) + '\n' +
               '```\n\n' +
@@ -244,7 +231,7 @@ jobs:
         env:
           PLAN_OUTPUT: ${{ needs.terraform-plan.outputs.plan_output }}
 
-  # Job 4: Terraform Apply to AWS
+  # Job 4: Terraform Apply
   terraform-apply:
     needs: [determine-environment, terraform-plan, manual-approval]
     if: |
@@ -255,7 +242,7 @@ jobs:
        needs.manual-approval.result == 'success')
     runs-on: ubuntu-latest
     environment:
-      name: aws-${{ needs.determine-environment.outputs.environment }}
+      name: ${{ needs.determine-environment.outputs.environment }}
       url: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - name: Checkout code
@@ -269,13 +256,12 @@ jobs:
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
 
-      - name: Configure AWS Credentials for Apply
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ needs.determine-environment.outputs.aws_role_arn }}
-          aws-region: ${{ needs.determine-environment.outputs.aws_region }}
+          role-to-assume: arn:aws:iam::${{ needs.determine-environment.outputs.aws_account_id }}:role/${{ needs.determine-environment.outputs.aws_role_name }}
+          aws-region: ${{ env.AWS_REGION }}
           role-session-name: github-actions-terraform-apply
-          role-duration-seconds: 3600
 
       - name: Download Terraform Plan
         uses: actions/download-artifact@v4
@@ -283,15 +269,15 @@ jobs:
           name: tfplan-${{ needs.determine-environment.outputs.environment }}
           path: /tmp
 
-      - name: Terraform Init for Apply
+      - name: Terraform Init
         working-directory: terraform/environments/${{ needs.determine-environment.outputs.environment }}
         run: |
           cat > backend.tf << EOF
           terraform {
             backend "s3" {
               bucket         = "${{ needs.determine-environment.outputs.aws_account_id }}-cinevision-terraform-state-${{ needs.determine-environment.outputs.environment }}"
-              key            = "terraform/${{ needs.determine-environment.outputs.environment }}/terraform.tfstate"
-              region         = "${{ needs.determine-environment.outputs.aws_region }}"
+              key            = "terraform/${{ needs.determine-environment.outputs.terraform_workspace }}/terraform.tfstate"
+              region         = "${{ env.AWS_REGION }}"
               dynamodb_table = "cinevision-terraform-locks-${{ needs.determine-environment.outputs.environment }}"
               encrypt        = true
             }
@@ -301,14 +287,13 @@ jobs:
           terraform init -backend=true -reconfigure
         env:
           TF_VAR_environment: ${{ needs.determine-environment.outputs.environment }}
-          TF_VAR_aws_region: ${{ needs.determine-environment.outputs.aws_region }}
 
       - name: Terraform Workspace Select
         working-directory: terraform/environments/${{ needs.determine-environment.outputs.environment }}
         run: |
           terraform workspace select ${{ needs.determine-environment.outputs.terraform_workspace }}
 
-      - name: Terraform Apply to AWS
+      - name: Terraform Apply
         id: apply
         working-directory: terraform/environments/${{ needs.determine-environment.outputs.environment }}
         run: |
@@ -316,25 +301,18 @@ jobs:
           echo "Applying Terraform changes to AWS"
           echo "Environment: ${{ needs.determine-environment.outputs.environment }}"
           echo "AWS Account: ${{ needs.determine-environment.outputs.aws_account_id }}"
-          echo "Region: ${{ needs.determine-environment.outputs.aws_region }}"
+          echo "Role: ${{ needs.determine-environment.outputs.aws_role_name }}"
+          echo "Region: ${{ env.AWS_REGION }}"
           echo "========================================="
           
-          terraform apply /tmp/tfplan
-          
-          # Capture outputs for reference
+          terraform apply /tmp/tfplan_${{ needs.determine-environment.outputs.environment }}
           terraform output -json > tf_outputs.json
-          
-          # Upload outputs to S3 for debugging
-          aws s3 cp tf_outputs.json \
-            s3://${{ needs.determine-environment.outputs.aws_account_id }}-cinevision-terraform-state-${{ needs.determine-environment.outputs.environment }}/outputs/ \
-            --region ${{ needs.determine-environment.outputs.aws_region }}
-          
           echo "apply_timestamp=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
           
       - name: Post-Apply Validation
         working-directory: terraform/environments/${{ needs.determine-environment.outputs.environment }}
         run: |
-          echo "✅ Terraform apply completed successfully in AWS"
+          echo "✅ Terraform apply completed successfully"
           echo ""
           echo "=== AWS Resources Deployed ==="
           terraform state list | head -20
@@ -350,7 +328,7 @@ jobs:
           path: terraform/environments/${{ needs.determine-environment.outputs.environment }}/tf_outputs.json
           retention-days: 30
 
-  # Job 5: AWS Deployment Notification
+  # Job 5: Deployment Notification
   notify-deployment:
     needs: [determine-environment, terraform-apply]
     if: always() && (needs.terraform-apply.result == 'success' || needs.terraform-apply.result == 'failure' || needs.terraform-apply.result == 'skipped')
@@ -392,11 +370,11 @@ jobs:
               sha: context.sha,
               state: deploymentStatus,
               context: 'AWS Terraform / ${{ needs.determine-environment.outputs.environment }}',
-              description: '${{ steps.status.outputs.status }}',
+              description: 'Deployment to ${{ needs.determine-environment.outputs.environment }} ${{ steps.status.outputs.status }}',
               target_url: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
             });
 
-      - name: Post AWS Deployment Comment
+      - name: Post Deployment Comment
         if: needs.terraform-apply.result == 'success' || needs.terraform-apply.result == 'failure'
         uses: actions/github-script@v7
         with:
@@ -405,16 +383,14 @@ jobs:
             const emoji = '${{ steps.status.outputs.emoji }}';
             const environmentName = '${{ needs.determine-environment.outputs.environment }}';
             const awsAccountId = '${{ needs.determine-environment.outputs.aws_account_id }}';
-            const awsRegion = '${{ needs.determine-environment.outputs.aws_region }}';
             const branchName = '${{ github.ref_name }}';
             const commitSha = '${{ github.sha }}';
             const actor = '${{ github.actor }}';
             const runUrl = '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}';
             
             let commentBody = '## ' + emoji + ' ' + status + '\n\n';
-            commentBody += '**AWS Environment:** `' + environmentName + '`\n';
+            commentBody += '**Environment:** `' + environmentName + '`\n';
             commentBody += '**AWS Account:** `' + awsAccountId + '`\n';
-            commentBody += '**AWS Region:** `' + awsRegion + '`\n';
             commentBody += '**Branch:** `' + branchName + '`\n';
             commentBody += '**Commit:** `' + commitSha + '`\n';
             commentBody += '**Started by:** @' + actor + '\n\n';
@@ -430,15 +406,15 @@ jobs:
               });
             }
 
-  # Job 6: Automatic Rollback in AWS (Prod only on failure)
-  aws-rollback:
+  # Job 6: Automatic Rollback (Prod only on failure)
+  rollback-on-failure:
     needs: [determine-environment, terraform-apply, notify-deployment]
     if: needs.terraform-apply.result == 'failure' && needs.determine-environment.outputs.environment == 'prod'
     runs-on: ubuntu-latest
     environment:
-      name: aws-rollback-prod
+      name: rollback-${{ needs.determine-environment.outputs.environment }}
     steps:
-      - name: Checkout previous working code
+      - name: Checkout code
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.before || github.ref }}
@@ -449,11 +425,11 @@ jobs:
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
 
-      - name: Configure AWS Credentials for Rollback
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ needs.determine-environment.outputs.aws_role_arn }}
-          aws-region: ${{ needs.determine-environment.outputs.aws_region }}
+          role-to-assume: arn:aws:iam::${{ needs.determine-environment.outputs.aws_account_id }}:role/${{ needs.determine-environment.outputs.aws_role_name }}
+          aws-region: ${{ env.AWS_REGION }}
           role-session-name: github-actions-terraform-rollback
 
       - name: Terraform Init for Rollback
@@ -464,7 +440,7 @@ jobs:
             backend "s3" {
               bucket         = "${{ needs.determine-environment.outputs.aws_account_id }}-cinevision-terraform-state-prod"
               key            = "terraform/prod/terraform.tfstate"
-              region         = "${{ needs.determine-environment.outputs.aws_region }}"
+              region         = "${{ env.AWS_REGION }}"
               dynamodb_table = "cinevision-terraform-locks-prod"
               encrypt        = true
             }
@@ -474,14 +450,13 @@ jobs:
           terraform init -backend=true -reconfigure
         env:
           TF_VAR_environment: prod
-          TF_VAR_aws_region: ${{ needs.determine-environment.outputs.aws_region }}
 
       - name: Terraform Workspace Select
         working-directory: terraform/environments/prod
         run: |
-          terraform workspace select prod
+          terraform workspace select prod || terraform workspace new prod
 
-      - name: Rollback AWS Infrastructure
+      - name: Rollback to Previous Version
         working-directory: terraform/environments/prod
         run: |
           echo "========================================="
@@ -497,18 +472,17 @@ jobs:
           git checkout ${{ github.event.before }} -- terraform/environments/prod/
           
           # Apply previous working state
-          terraform apply -auto-approve \
-            -var-file="environments/prod/terraform.tfvars"
+          terraform apply -auto-approve
           
           echo "✅ AWS rollback completed successfully"
           echo "Infrastructure reverted to previous working state"
           
-      - name: Notify AWS Rollback
+      - name: Notify Rollback
         uses: actions/github-script@v7
         with:
           script: |
             const rollbackMessage = '## 🔄 AWS AUTO-ROLLBACK EXECUTED\n\n' +
-              '**AWS Environment:** `PRODUCTION`\n' +
+              '**Environment:** `PRODUCTION`\n' +
               '**Status:** Rollback completed successfully\n' +
               '**Previous Commit:** `${{ github.event.before }}`\n' +
               '**Failed Commit:** `${{ github.sha }}`\n\n' +
@@ -516,8 +490,7 @@ jobs:
               '**Action Required:** \n' +
               '1. Investigate the failure in the [original workflow](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})\n' +
               '2. Review AWS CloudWatch logs for errors\n' +
-              '3. Fix the issue before retrying the deployment\n\n' +
-              '**AWS Console:** https://console.aws.amazon.com';
+              '3. Fix the issue before retrying the deployment';
             
             const prNumber = context.payload.pull_request?.number;
             if (prNumber) {
@@ -528,40 +501,3 @@ jobs:
                 body: rollbackMessage
               });
             }
-
-  # Job 7: Post-Deployment Validation (Optional)
-  post-deployment-validation:
-    needs: [determine-environment, terraform-apply]
-    if: needs.terraform-apply.result == 'success'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Validate AWS Resources
-        env:
-          AWS_REGION: ${{ needs.determine-environment.outputs.aws_region }}
-          AWS_ACCOUNT: ${{ needs.determine-environment.outputs.aws_account_id }}
-        run: |
-          echo "========================================="
-          echo "Running post-deployment validation"
-          echo "========================================="
-          
-          # Configure AWS CLI
-          aws configure set region $AWS_REGION
-          
-          # Validate EKS clusters if they exist
-          if aws eks list-clusters --region $AWS_REGION | grep -q "cinevision"; then
-            echo "✅ EKS cluster validation passed"
-          fi
-          
-          # Validate RDS if it exists
-          if aws rds describe-db-instances --region $AWS_REGION 2>/dev/null; then
-            echo "✅ RDS validation passed"
-          fi
-          
-          # Validate S3 buckets
-          if aws s3 ls | grep -q "cinevision"; then
-            echo "✅ S3 buckets validation passed"
-          fi
-          
-          echo "========================================="
-          echo "✅ Post-deployment validation complete"
-          echo "========================================="
