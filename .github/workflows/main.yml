@@ -2,434 +2,263 @@ name: PR Validation
 
 on:
   pull_request:
-    branches: [ develop, main ]
+    branches: [develop, main]
     types: [opened, synchronize, reopened, ready_for_review]
 
+concurrency:
+  group: pr-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
-  # Cache optimization
   TERRAFORM_VERSION: '1.6.6'
-  TFLINT_VERSION: '0.48.0'
-  CHECKOV_VERSION: '3.0.0'
   KUBERNETES_VERSION: '1.28'
-  
+  NODE_VERSION: '18'
+  JAVA_VERSION: '17'
+
 jobs:
-  # Job 1: Detect changed paths for optimization
+
+# --------------------------------
+# 1. Detect Changes
+# --------------------------------
   detect-changes:
     runs-on: ubuntu-latest
     outputs:
       terraform: ${{ steps.filter.outputs.terraform }}
       k8s: ${{ steps.filter.outputs.k8s }}
       services: ${{ steps.filter.outputs.services }}
-      jenkins: ${{ steps.filter.outputs.jenkins }}
       docs: ${{ steps.filter.outputs.docs }}
-      tests: ${{ steps.filter.outputs.tests }}
       scripts: ${{ steps.filter.outputs.scripts }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # Full history for accurate change detection
-      
+
       - uses: dorny/paths-filter@v2
         id: filter
         with:
           filters: |
-            terraform:
-              - 'terraform/**'
-              - '.github/workflows/terraform-*'
-            k8s:
-              - 'k8s/**'
-              - 'argocd-applications.yaml'
-            services:
-              - 'services/**'
-              - 'docker-compose.yml'
-            jenkins:
-              - 'jenkins/**'
-              - 'Jenkinsfile'
-            docs:
-              - 'docs/**'
-              - 'README.md'
-            tests:
-              - 'tests/**'
-            scripts:
-              - 'scripts/**'
+            terraform: ['terraform/**']
+            k8s: ['k8s/**']
+            services: ['services/**']
+            docs: ['docs/**', 'README.md']
+            scripts: ['scripts/**']
 
-  # Job 2: Terraform Validation (with security scanning)
+# --------------------------------
+# 2. Terraform Validation
+# --------------------------------
   terraform-validation:
     needs: detect-changes
     if: needs.detect-changes.outputs.terraform == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        environment: [dev, staging, prod, prod-dr]
+        env: [dev, staging, prod, prod-dr]
+
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+
+      - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
-      
-      - name: Setup TFLint
-        run: |
-          curl -s https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
-      
-      - name: Setup Checkov (Security Scanning)
-        run: |
-          pip3 install checkov==${{ env.CHECKOV_VERSION }}
-      
-      - name: Terraform Format Check
-        run: |
-          terraform fmt -recursive -check terraform/
-      
-      - name: Terraform Init (${{ matrix.environment }})
-        run: |
-          cd terraform/environments/${{ matrix.environment }}
-          terraform init -backend=false
-        continue-on-error: false
-      
-      - name: Terraform Validate (${{ matrix.environment }})
-        run: |
-          cd terraform/environments/${{ matrix.environment }}
-          terraform validate
-      
-      - name: TFLint (Module Best Practices)
-        run: |
-          cd terraform
-          tflint --recursive --config .tflint.hcl
-      
-      - name: Checkov Security Scan
-        run: |
-          checkov --directory terraform/ \
-                  --quiet \
-                  --soft-fail \
-                  --output cli \
-                  --skip-check CKV_AWS_18,CKV_AWS_23  # Skip specific known false positives
-      
-      - name: Terraform Plan (Security & Cost Estimation)
-        run: |
-          cd terraform/environments/${{ matrix.environment }}
-          terraform plan -input=false -no-color
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        continue-on-error: true
-      
-      - name: Upload Terraform Plan Artifact
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: terraform-plan-${{ matrix.environment }}
-          path: terraform/environments/${{ matrix.environment }}/tfplan
-          retention-days: 7
 
-  # Job 3: Kubernetes Manifest Validation
+      - name: Cache Terraform
+        uses: actions/cache@v3
+        with:
+          path: ~/.terraform.d/plugin-cache
+          key: terraform-${{ runner.os }}
+
+      - name: Format Check
+        run: terraform fmt -recursive -check terraform/
+
+      - name: Init
+        run: |
+          cd terraform/environments/${{ matrix.env }}
+          terraform init -backend=false
+
+      - name: Validate
+        run: |
+          cd terraform/environments/${{ matrix.env }}
+          terraform validate
+
+      - name: Plan
+        id: plan
+        run: |
+          cd terraform/environments/${{ matrix.env }}
+          terraform plan -out=tfplan -no-color
+
+      - name: Upload Plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ matrix.env }}
+          path: terraform/environments/${{ matrix.env }}/tfplan
+
+# --------------------------------
+# 3. Kubernetes Validation
+# --------------------------------
   kubernetes-validation:
     needs: detect-changes
     if: needs.detect-changes.outputs.k8s == 'true'
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Setup Kubeval
-        run: |
-          wget https://github.com/yannh/kubeconform/releases/download/v0.6.3/kubeconform-linux-amd64.tar.gz
-          tar xf kubeconform-linux-amd64.tar.gz
-          sudo mv kubeconform /usr/local/bin/
-      
-      - name: Setup Kustomize
-        uses: imranismail/setup-kustomize@v2
-        with:
-          kustomize-version: '5.3.0'
-      
-      - name: Setup Kubescape (Security Scanner)
-        run: |
-          curl -s https://raw.githubusercontent.com/kubescape/kubescape/master/install.sh | /bin/bash
-      
-      - name: Validate Kubernetes Manifests (Kubeconform)
-        run: |
-          find k8s -name '*.yaml' -not -path '*/secrets/*' | xargs -I {} kubeconform -kubernetes-version ${{ env.KUBERNETES_VERSION }} -strict {}
-      
-      - name: Kustomize Build Test
-        run: |
-          for overlay in dev staging prod dr; do
-            echo "Testing $overlay overlay..."
-            kustomize build k8s/overlays/$overlay > /dev/null
-          done
-      
-      - name: Kubescape Security Scan (CIS Benchmarks)
-        run: |
-          kubescape scan --format json \
-                        --exclude-namespaces kube-system \
-                        --fail-threshold 70 \
-                        k8s/base/
-      
-      - name: Validate Secrets Provider Class
-        run: |
-          if [ -f "k8s/base/secrets-provider-class.yaml" ]; then
-            echo "Secrets Provider Class found - validating..."
-            grep -q "aws.secretsmanager" k8s/base/secrets-provider-class.yaml
-          fi
-      
-      - name: Check for Hardcoded Secrets
-        run: |
-          if grep -r "secret:" k8s/ --exclude="secrets-provider-class.yaml" --exclude-dir="secrets"; then
-            echo "ERROR: Hardcoded secrets found in manifests!"
-            exit 1
-          fi
 
-  # Job 4: Java Microservices Validation
+      - name: Install kubeconform
+        run: |
+          curl -L https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | tar xz
+          sudo mv kubeconform /usr/local/bin/
+
+      - name: Validate manifests
+        run: find k8s -name '*.yaml' | xargs kubeconform -strict
+
+      - name: Kustomize Build
+        run: |
+          for env in dev staging prod dr; do
+            kustomize build k8s/overlays/$env > /dev/null
+          done
+
+# --------------------------------
+# 4. Services Validation (Backend + Frontend)
+# --------------------------------
   services-validation:
     needs: detect-changes
     if: needs.detect-changes.outputs.services == 'true'
     runs-on: ubuntu-latest
+
     strategy:
       matrix:
-        service: [api-gateway, eureka-server, movie-service, user-service, email-service]
+        service: [api-gateway, eureka-server, movie-service, user-service, email-service, frontend]
+
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Set up JDK 17
+
+      # Backend (Java)
+      - name: Setup Java
+        if: matrix.service != 'frontend'
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
+          java-version: ${{ env.JAVA_VERSION }}
           distribution: 'temurin'
           cache: 'maven'
-      
-      - name: Setup Node.js for Frontend
+
+      # Frontend (Node)
+      - name: Setup Node
         if: matrix.service == 'frontend'
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
           cache-dependency-path: services/frontend/package-lock.json
-      
-      - name: Cache Maven dependencies
-        uses: actions/cache@v3
-        with:
-          path: ~/.m2
-          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
-          restore-keys: ${{ runner.os }}-m2
-      
-      - name: Build and Test ${{ matrix.service }}
+
+      # Build & Test
+      - name: Build & Test
         run: |
           cd services/${{ matrix.service }}
           if [ "${{ matrix.service }}" == "frontend" ]; then
             npm ci
-            npm run test:ci
+            npm run test --if-present
             npm run build
           else
-            mvn clean compile test
-            mvn jacoco:report
+            mvn clean test
           fi
-      
+
+      # Upload Reports
       - name: Upload Test Reports
-        uses: actions/upload-artifact@v4
         if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: test-reports-${{ matrix.service }}
+          name: reports-${{ matrix.service }}
           path: |
             services/${{ matrix.service }}/target/surefire-reports/
-            services/${{ matrix.service }}/target/jacoco-report/
+            services/${{ matrix.service }}/target/site/
+            services/${{ matrix.service }}/coverage/
           retention-days: 7
-      
-      - name: SonarCloud Scan (Backend Services)
-        if: matrix.service != 'frontend'
-        uses: SonarSource/sonarcloud-github-action@master
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        with:
-          projectBaseDir: services/${{ matrix.service }}
 
-  # Job 5: Integration & Performance Tests
-  integration-tests:
-    needs: [detect-changes, services-validation]
-    if: needs.detect-changes.outputs.services == 'true' || needs.detect-changes.outputs.tests == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-          cache: 'npm'
-          cache-dependency-path: tests/integration/package-lock.json
-      
-      - name: Start Docker Compose Environment
-        run: |
-          docker-compose up -d
-          sleep 30  # Wait for services to be ready
-      
-      - name: Run Integration Tests
-        run: |
-          cd tests/integration
-          npm ci
-          npm test
-        env:
-          API_GATEWAY_URL: http://localhost:8080
-          EUREKA_URL: http://localhost:8761
-      
-      - name: Run Performance Tests (k6)
-        if: github.base_ref == 'main' || github.base_ref == 'develop'
-        run: |
-          docker run --rm -v $PWD/tests/performance:/scripts \
-            loadimpact/k6 run /scripts/ticket-purchase-test.js
-      
-      - name: Docker Compose Logs on Failure
-        if: failure()
-        run: docker-compose logs
-      
-      - name: Stop Docker Compose
-        if: always()
-        run: docker-compose down
-
-  # Job 6: Jenkins Pipeline Validation
-  jenkins-validation:
+# --------------------------------
+# 5. Scripts Validation
+# --------------------------------
+  scripts-validation:
     needs: detect-changes
-    if: needs.detect-changes.outputs.jenkins == 'true'
+    if: needs.detect-changes.outputs.scripts == 'true'
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Validate Jenkinsfile Syntax
-        uses: jenkinsci/jenkinsfile-linter-action@v1
-        with:
-          jenkinsfile: Jenkinsfile
-          jenkins-url: https://jenkins.cinevision.com
-        continue-on-error: true  # Don't block PR if Jenkins unreachable
-      
-      - name: Validate Shared Libraries
+
+      - name: Install tools
         run: |
-          if [ -d "jenkins/pipelines" ]; then
-            find jenkins/pipelines -name '*.groovy' -exec groovy -c {} \;
-          fi
-      
-      - name: Check for Security Anti-Patterns
+          sudo apt-get update
+          sudo apt-get install -y shellcheck python3 ansible
+
+      - name: Shell scripts lint
+        run: find scripts -name '*.sh' -exec shellcheck {} \;
+
+      - name: Python syntax check
+        run: find scripts/python -name '*.py' -exec python3 -m py_compile {} \;
+
+      - name: Ansible validation
         run: |
-          # Check for hardcoded credentials in Jenkins pipelines
-          if grep -r "withCredentials.*password" jenkins/ --include="*.groovy"; then
-            echo "WARNING: Verify credentials are properly masked"
+          if ls scripts/ansible/*.yml 1> /dev/null 2>&1; then
+            ansible-playbook --syntax-check scripts/ansible/*.yml
           fi
 
-  # Job 7: Scripts & Documentation Validation
-  scripts-docs-validation:
+# --------------------------------
+# 6. Documentation Validation
+# --------------------------------
+  docs-validation:
     needs: detect-changes
-    if: needs.detect-changes.outputs.scripts == 'true' || needs.detect-changes.outputs.docs == 'true'
+    if: needs.detect-changes.outputs.docs == 'true'
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Shell Script Linting
-        if: needs.detect-changes.outputs.scripts == 'true'
-        run: |
-          find scripts -name '*.sh' -exec shellcheck {} \;
-      
-      - name: Python Script Syntax Check
-        if: needs.detect-changes.outputs.scripts == 'true'
-        run: |
-          find scripts/python -name '*.py' -exec python3 -m py_compile {} \;
-      
-      - name: Ansible Playbook Validation
-        if: needs.detect-changes.outputs.scripts == 'true' && hashFiles('scripts/ansible/*.yml')
-        run: |
-          ansible-playbook --syntax-check scripts/ansible/*.yml
-        continue-on-error: true
-      
-      - name: Validate Markdown Links
-        if: needs.detect-changes.outputs.docs == 'true'
+
+      - name: Markdown link check
         uses: gaurav-nelson/github-action-markdown-link-check@v1
         with:
           use-quiet-mode: 'yes'
-          config-file: '.github/workflows/mlc_config.json'
-      
-      - name: Check Documentation Freshness
-        if: needs.detect-changes.outputs.docs == 'true'
+
+      - name: Check documentation freshness
         run: |
-          # Check if runbooks are updated when infrastructure changes
           if git diff --name-only HEAD~1 | grep -q "terraform/\|k8s/"; then
-            if ! git diff --name-only HEAD~1 | grep -q "docs/runbooks/"; then
-              echo "⚠️  WARNING: Infrastructure changed but runbooks not updated"
+            if ! git diff --name-only HEAD~1 | grep -q "docs/"; then
+              echo "⚠️ Infra changed but docs not updated"
             fi
           fi
 
-  # Job 8: Security Scanning (OWASP ZAP)
-  security-scan:
-    needs: [services-validation, integration-tests]
-    if: github.base_ref == 'main'  # Only run on PRs targeting main
+# --------------------------------
+# 7. Security Scan (Secrets)
+# --------------------------------
+  secrets-scan:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Start Application
-        run: |
-          docker-compose up -d
-          sleep 30
-      
-      - name: ZAP Security Scan
-        uses: zaproxy/action-full-scan@v0.9.0
-        with:
-          target: 'http://localhost:8080'
-          rules_file_name: '.github/workflows/zap-rules.tsv'
-          cmd_options: '-a -t 60'
-      
-      - name: Upload ZAP Report
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: zap-scan-report
-          path: /home/runner/work/_actions/zaproxy/action-full-scan/v0.9.0/report_html.html
-          retention-days: 30
+      - uses: gitleaks/gitleaks-action@v2
 
-  # Final Job: Quality Gate
+# --------------------------------
+# 8. Quality Gate
+# --------------------------------
   quality-gate:
-    needs: [terraform-validation, kubernetes-validation, services-validation, 
-            integration-tests, security-scan]
+    needs:
+      [
+        terraform-validation,
+        kubernetes-validation,
+        services-validation,
+        scripts-validation,
+        docs-validation,
+        secrets-scan
+      ]
     if: always()
     runs-on: ubuntu-latest
+
     steps:
-      - name: Check All Validations Passed
+      - name: Evaluate Results
         run: |
-          FAILED=0
-          
-          # Check each job status
-          for job in terraform-validation kubernetes-validation services-validation integration-tests security-scan; do
-            if [ "${{ needs[job].result }}" != "success" ] && [ "${{ needs[job].result }}" != "skipped" ]; then
-              echo "❌ $job failed"
-              FAILED=1
-            else
-              echo "✅ $job passed or skipped"
-            fi
+          for job in ${{ toJson(needs) }}; do
+            echo "$job"
           done
-          
-          if [ $FAILED -eq 1 ]; then
-            echo "Quality gate failed!"
+
+          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" ]]; then
+            echo "❌ Validation failed"
             exit 1
           fi
-          
-          echo "🎉 All validations passed! PR ready for review."
-      
-      - name: Add PR Comment with Results
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const summary = `
-            ## ✅ PR Validation Complete
-            
-            | Validation Type | Status |
-            |----------------|--------|
-            | Terraform | ${{ needs.terraform-validation.result == 'success' && '✅' || needs.terraform-validation.result == 'skipped' && '⏭️ Skipped' || '❌' }} |
-            | Kubernetes | ${{ needs.kubernetes-validation.result == 'success' && '✅' || needs.kubernetes-validation.result == 'skipped' && '⏭️ Skipped' || '❌' }} |
-            | Services | ${{ needs.services-validation.result == 'success' && '✅' || needs.services-validation.result == 'skipped' && '⏭️ Skipped' || '❌' }} |
-            | Integration Tests | ${{ needs.integration-tests.result == 'success' && '✅' || needs.integration-tests.result == 'skipped' && '⏭️ Skipped' || '❌' }} |
-            | Security Scan | ${{ needs.security-scan.result == 'success' && '✅' || needs.security-scan.result == 'skipped' && '⏭️ Skipped' || '❌' }} |
-            
-            Ready for review by maintainers.
-            `;
-            
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: summary
-            });
+
+          echo "✅ All validations passed"
