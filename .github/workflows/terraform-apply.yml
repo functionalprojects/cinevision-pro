@@ -10,7 +10,7 @@ on:
       - main
       - release/**
     paths:
-      - 'terraform/**'                       # ✅ ONLY trigger on Terraform changes
+      - 'terraform/**'                       # ONLY trigger on Terraform changes
       - '.github/workflows/terraform-*'      # Optional: allow pipeline updates
 
   pull_request:
