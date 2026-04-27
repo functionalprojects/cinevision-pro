@@ -19,7 +19,7 @@ on:
       - develop
       - main
     paths:
-      - 'terraform/**'                       # ✅ Only if Terraform changed in PR
+      - 'terraform/**'                       # Only if Terraform changed in PR
 
   # 🔥 Manual trigger (independent of paths)
   workflow_dispatch:
