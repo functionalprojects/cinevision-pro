@@ -18,7 +18,7 @@ env:
 jobs:
 
 # --------------------------------
-# 1. Detect Changes
+# 1. Detect Changes (Path-based optimization)
 # --------------------------------
   detect-changes:
     runs-on: ubuntu-latest
@@ -48,6 +48,7 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.terraform == 'true'
     runs-on: ubuntu-latest
+
     strategy:
       matrix:
         env: [dev, staging, prod, prod-dr]
@@ -59,36 +60,23 @@ jobs:
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
 
-      - name: Cache Terraform
-        uses: actions/cache@v3
-        with:
-          path: ~/.terraform.d/plugin-cache
-          key: terraform-${{ runner.os }}
-
-      - name: Format Check
+      - name: Terraform Format Check
         run: terraform fmt -recursive -check terraform/
 
-      - name: Init
+      - name: Terraform Init
         run: |
           cd terraform/environments/${{ matrix.env }}
           terraform init -backend=false
 
-      - name: Validate
+      - name: Terraform Validate
         run: |
           cd terraform/environments/${{ matrix.env }}
           terraform validate
 
-      - name: Plan
-        id: plan
+      - name: Terraform Plan (Safe Mode)
         run: |
           cd terraform/environments/${{ matrix.env }}
-          terraform plan -out=tfplan -no-color
-
-      - name: Upload Plan
-        uses: actions/upload-artifact@v4
-        with:
-          name: tfplan-${{ matrix.env }}
-          path: terraform/environments/${{ matrix.env }}/tfplan
+          terraform plan -no-color -input=false
 
 # --------------------------------
 # 3. Kubernetes Validation
@@ -106,10 +94,15 @@ jobs:
           curl -L https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | tar xz
           sudo mv kubeconform /usr/local/bin/
 
+      - name: Install kustomize
+        run: |
+          curl -s https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh | bash
+          sudo mv kustomize /usr/local/bin/
+
       - name: Validate manifests
         run: find k8s -name '*.yaml' | xargs kubeconform -strict
 
-      - name: Kustomize Build
+      - name: Kustomize Build Test
         run: |
           for env in dev staging prod dr; do
             kustomize build k8s/overlays/$env > /dev/null
@@ -130,7 +123,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Backend (Java)
       - name: Setup Java
         if: matrix.service != 'frontend'
         uses: actions/setup-java@v4
@@ -139,7 +131,6 @@ jobs:
           distribution: 'temurin'
           cache: 'maven'
 
-      # Frontend (Node)
       - name: Setup Node
         if: matrix.service == 'frontend'
         uses: actions/setup-node@v4
@@ -148,7 +139,6 @@ jobs:
           cache: 'npm'
           cache-dependency-path: services/frontend/package-lock.json
 
-      # Build & Test
       - name: Build & Test
         run: |
           cd services/${{ matrix.service }}
@@ -160,7 +150,6 @@ jobs:
             mvn clean test
           fi
 
-      # Upload Reports
       - name: Upload Test Reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -188,10 +177,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y shellcheck python3 ansible
 
-      - name: Shell scripts lint
+      - name: Shell lint
         run: find scripts -name '*.sh' -exec shellcheck {} \;
 
-      - name: Python syntax check
+      - name: Python syntax
         run: find scripts/python -name '*.py' -exec python3 -m py_compile {} \;
 
       - name: Ansible validation
@@ -213,28 +202,28 @@ jobs:
 
       - name: Markdown link check
         uses: gaurav-nelson/github-action-markdown-link-check@v1
-        with:
-          use-quiet-mode: 'yes'
-
-      - name: Check documentation freshness
-        run: |
-          if git diff --name-only HEAD~1 | grep -q "terraform/\|k8s/"; then
-            if ! git diff --name-only HEAD~1 | grep -q "docs/"; then
-              echo "⚠️ Infra changed but docs not updated"
-            fi
-          fi
 
 # --------------------------------
-# 7. Security Scan (Secrets)
+# 7. Security Scan (FREE Gitleaks CLI)
 # --------------------------------
   secrets-scan:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
-      - uses: gitleaks/gitleaks-action@v2
+
+      - name: Install Gitleaks (FREE)
+        run: |
+          curl -sSL https://github.com/gitleaks/gitleaks/releases/latest/download/gitleaks-linux-amd64.tar.gz -o gitleaks.tar.gz
+          tar -xzf gitleaks.tar.gz
+          sudo mv gitleaks /usr/local/bin/
+
+      - name: Run Gitleaks Scan
+        run: |
+          gitleaks detect --source . --redact --verbose
 
 # --------------------------------
-# 8. Quality Gate
+# 8. Quality Gate (FIXED)
 # --------------------------------
   quality-gate:
     needs:
@@ -250,15 +239,32 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Evaluate Results
+      - name: Evaluate Results (Fixed)
         run: |
-          for job in ${{ toJson(needs) }}; do
-            echo "$job"
-          done
+          FAILED=0
 
-          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" ]]; then
-            echo "❌ Validation failed"
+          check_job () {
+            NAME=$1
+            STATUS=$2
+
+            if [ "$STATUS" != "success" ] && [ "$STATUS" != "skipped" ]; then
+              echo "❌ $NAME failed"
+              FAILED=1
+            else
+              echo "✅ $NAME passed or skipped"
+            fi
+          }
+
+          check_job "terraform-validation" "${{ needs.terraform-validation.result }}"
+          check_job "kubernetes-validation" "${{ needs.kubernetes-validation.result }}"
+          check_job "services-validation" "${{ needs.services-validation.result }}"
+          check_job "scripts-validation" "${{ needs.scripts-validation.result }}"
+          check_job "docs-validation" "${{ needs.docs-validation.result }}"
+          check_job "secrets-scan" "${{ needs.secrets-scan.result }}"
+
+          if [ $FAILED -eq 1 ]; then
+            echo "❌ Quality gate failed"
             exit 1
           fi
 
-          echo "✅ All validations passed"
+          echo "🎉 All validations passed"
