@@ -18,7 +18,7 @@ env:
 jobs:
 
 # --------------------------------
-# 1. Detect Changes (Path-based optimization)
+# 1. Detect Changes
 # --------------------------------
   detect-changes:
     runs-on: ubuntu-latest
@@ -71,7 +71,7 @@ jobs:
           terraform init -backend=false
           terraform validate
 
-      - name: Terraform Plan (Safe Mode)
+      - name: Terraform Plan
         run: |
           set -e
           cd terraform/environments/${{ matrix.env }}
@@ -111,7 +111,7 @@ jobs:
           done
 
 # --------------------------------
-# 4. Services Validation (Backend + Frontend)
+# 4. Services Validation
 # --------------------------------
   services-validation:
     needs: detect-changes
@@ -125,7 +125,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Backend (Java)
       - name: Setup Java
         if: matrix.service != 'frontend'
         uses: actions/setup-java@v4
@@ -134,7 +133,6 @@ jobs:
           distribution: 'temurin'
           cache: 'maven'
 
-      # Frontend (Node)
       - name: Setup Node
         if: matrix.service == 'frontend'
         uses: actions/setup-node@v4
@@ -210,7 +208,7 @@ jobs:
         uses: gaurav-nelson/github-action-markdown-link-check@v1
 
 # --------------------------------
-# 7. Security Scan (FIXED - Gitleaks CLI)
+# 7. Security Scan (FINAL FIX)
 # --------------------------------
   secrets-scan:
     runs-on: ubuntu-latest
@@ -218,16 +216,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Gitleaks (Stable Method)
+      - name: Install Gitleaks (Deterministic)
         run: |
-          curl -sSfL https://raw.githubusercontent.com/gitleaks/gitleaks/master/install.sh | sh -s -- -b /usr/local/bin
+          set -e
 
-      - name: Run Gitleaks Scan
+          VERSION=$(curl -s https://api.github.com/repos/gitleaks/gitleaks/releases/latest | grep tag_name | cut -d '"' -f 4)
+
+          curl -L https://github.com/gitleaks/gitleaks/releases/download/${VERSION}/gitleaks_${VERSION#v}_linux_x64.tar.gz -o gitleaks.tar.gz
+
+          tar -xzf gitleaks.tar.gz
+
+          sudo mv gitleaks /usr/local/bin/
+
+      - name: Verify Installation
         run: |
-          gitleaks detect --source . --redact --verbose
+          which gitleaks
+          gitleaks version
+
+      - name: Run Gitleaks Scan (Fail on secrets)
+        run: |
+          gitleaks detect --source . --redact --verbose --exit-code 1
 
 # --------------------------------
-# 8. Quality Gate (Final Guard)
+# 8. Quality Gate
 # --------------------------------
   quality-gate:
     needs:
