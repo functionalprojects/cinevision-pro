@@ -28,6 +28,7 @@ jobs:
       services: ${{ steps.filter.outputs.services }}
       docs: ${{ steps.filter.outputs.docs }}
       scripts: ${{ steps.filter.outputs.scripts }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -63,18 +64,16 @@ jobs:
       - name: Terraform Format Check
         run: terraform fmt -recursive -check terraform/
 
-      - name: Terraform Init
+      - name: Terraform Init & Validate
         run: |
+          set -e
           cd terraform/environments/${{ matrix.env }}
           terraform init -backend=false
-
-      - name: Terraform Validate
-        run: |
-          cd terraform/environments/${{ matrix.env }}
           terraform validate
 
       - name: Terraform Plan (Safe Mode)
         run: |
+          set -e
           cd terraform/environments/${{ matrix.env }}
           terraform plan -no-color -input=false
 
@@ -100,10 +99,13 @@ jobs:
           sudo mv kustomize /usr/local/bin/
 
       - name: Validate manifests
-        run: find k8s -name '*.yaml' | xargs kubeconform -strict
+        run: |
+          set -e
+          find k8s -name '*.yaml' | xargs kubeconform -strict
 
       - name: Kustomize Build Test
         run: |
+          set -e
           for env in dev staging prod dr; do
             kustomize build k8s/overlays/$env > /dev/null
           done
@@ -123,6 +125,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Backend (Java)
       - name: Setup Java
         if: matrix.service != 'frontend'
         uses: actions/setup-java@v4
@@ -131,6 +134,7 @@ jobs:
           distribution: 'temurin'
           cache: 'maven'
 
+      # Frontend (Node)
       - name: Setup Node
         if: matrix.service == 'frontend'
         uses: actions/setup-node@v4
@@ -141,13 +145,15 @@ jobs:
 
       - name: Build & Test
         run: |
+          set -e
           cd services/${{ matrix.service }}
+
           if [ "${{ matrix.service }}" == "frontend" ]; then
             npm ci
             npm run test --if-present
             npm run build
           else
-            mvn clean test
+            mvn -B clean test
           fi
 
       - name: Upload Test Reports
@@ -204,7 +210,7 @@ jobs:
         uses: gaurav-nelson/github-action-markdown-link-check@v1
 
 # --------------------------------
-# 7. Security Scan (FREE Gitleaks CLI)
+# 7. Security Scan (FIXED - Gitleaks CLI)
 # --------------------------------
   secrets-scan:
     runs-on: ubuntu-latest
@@ -212,18 +218,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Gitleaks (FREE)
+      - name: Install Gitleaks (Stable Method)
         run: |
-          curl -sSL https://github.com/gitleaks/gitleaks/releases/latest/download/gitleaks-linux-amd64.tar.gz -o gitleaks.tar.gz
-          tar -xzf gitleaks.tar.gz
-          sudo mv gitleaks /usr/local/bin/
+          curl -sSfL https://raw.githubusercontent.com/gitleaks/gitleaks/master/install.sh | sh -s -- -b /usr/local/bin
 
       - name: Run Gitleaks Scan
         run: |
           gitleaks detect --source . --redact --verbose
 
 # --------------------------------
-# 8. Quality Gate (FIXED)
+# 8. Quality Gate (Final Guard)
 # --------------------------------
   quality-gate:
     needs:
@@ -239,7 +243,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Evaluate Results (Fixed)
+      - name: Evaluate Results
         run: |
           FAILED=0
 
