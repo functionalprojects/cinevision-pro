@@ -28,6 +28,18 @@ locals {
   })
 }
 
+data "aws_secretsmanager_secret_version" "database_credentials" {
+  secret_id = var.database_credentials_secret_name
+}
+
+data "aws_secretsmanager_secret" "application_secrets" {
+  name = var.application_secrets_secret_name
+}
+
+locals {
+  database_credentials = jsondecode(data.aws_secretsmanager_secret_version.database_credentials.secret_string)
+}
+
 module "vpc" {
   source = "../../modules/vpc"
 
@@ -61,6 +73,26 @@ module "s3_cloudfront" {
   tags                 = local.tags
 }
 
+module "movie_posters_s3" {
+  source = "../../modules/s3"
+
+  bucket_name  = var.movie_posters_bucket_name
+  environment  = local.environment
+  project_name = var.project_name
+  is_public    = true
+  tags         = local.tags
+}
+
+module "email_archives_s3" {
+  source = "../../modules/s3"
+
+  bucket_name  = var.email_archives_bucket_name
+  environment  = local.environment
+  project_name = var.project_name
+  is_public    = false
+  tags         = local.tags
+}
+
 module "eks" {
   source = "../../modules/eks"
 
@@ -84,8 +116,8 @@ module "rds" {
 
   identifier              = "${var.project_name}-${local.environment}-postgres"
   db_name                 = var.db_name
-  username                = var.db_username
-  password                = var.db_password
+  username                = try(local.database_credentials.postgres_username, var.db_username)
+  password                = local.database_credentials.postgres_password
   instance_class          = var.rds_instance_class
   subnet_ids              = module.vpc.database_subnet_ids
   security_group_ids      = [module.vpc.rds_security_group_id]
@@ -103,8 +135,8 @@ module "documentdb" {
   }
 
   cluster_name          = "${var.project_name}-${local.environment}-docdb"
-  master_username       = var.docdb_master_username
-  master_password       = var.docdb_master_password
+  master_username       = try(local.database_credentials.docdb_master_username, var.docdb_master_username)
+  master_password       = local.database_credentials.docdb_master_password
   subnet_ids            = module.vpc.database_subnet_ids
   security_group_ids    = [module.vpc.documentdb_security_group_id]
   enable_global_cluster = false

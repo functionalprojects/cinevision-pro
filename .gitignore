@@ -64,6 +64,7 @@ terraform/environments/**/terraform.tfstate.backup
 *.tfvars.json
 terraform.tfvars
 terraform.tfvars.json
+!*.tfvars.example
 
 # But allow example files
 !example.tfvars

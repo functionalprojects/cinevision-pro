@@ -10,6 +10,14 @@ output "cloudfront_domain_name" {
   value = module.s3_cloudfront.cloudfront_domain_name
 }
 
+output "movie_posters_bucket_name" {
+  value = module.movie_posters_s3.bucket_name
+}
+
+output "email_archives_bucket_name" {
+  value = module.email_archives_s3.bucket_name
+}
+
 output "eks_cluster_name" {
   value = module.eks.cluster_name
 }
@@ -28,4 +36,16 @@ output "redis_endpoint" {
 
 output "msk_bootstrap_brokers_tls" {
   value = module.msk.bootstrap_brokers_tls
+}
+
+output "database_credentials_secret_name" {
+  value = var.database_credentials_secret_name
+}
+
+output "application_secrets_secret_name" {
+  value = data.aws_secretsmanager_secret.application_secrets.name
+}
+
+output "application_secrets_secret_arn" {
+  value = data.aws_secretsmanager_secret.application_secrets.arn
 }
