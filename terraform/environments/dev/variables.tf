@@ -1,41 +1,70 @@
-variable "project_name" { type = string }
+variable "project_name" {
+  type    = string
+  default = "cinevision"
+}
 variable "aws_profile" {
-  type = string
+  type    = string
+  default = "cinevision-dev"
   validation {
     condition     = length(trim(var.aws_profile, " ")) > 0
     error_message = "aws_profile must be set to a valid AWS CLI profile."
   }
 }
-variable "primary_region" { type = string }
-variable "dr_region" { type = string }
-variable "cidr_block" { type = string }
-variable "azs" { type = list(string) }
-variable "public_subnet_cidrs" { type = list(string) }
-variable "private_subnet_cidrs" { type = list(string) }
-variable "database_subnet_cidrs" { type = list(string) }
+variable "primary_region" {
+  type    = string
+  default = "us-east-1"
+}
+variable "dr_region" {
+  type    = string
+  default = "us-west-2"
+}
+variable "cidr_block" {
+  type    = string
+  default = "10.10.0.0/16"
+}
+variable "azs" {
+  type    = list(string)
+  default = ["us-east-1a", "us-east-1b", "us-east-1c"]
+}
+variable "public_subnet_cidrs" {
+  type    = list(string)
+  default = ["10.10.0.0/24", "10.10.1.0/24", "10.10.2.0/24"]
+}
+variable "private_subnet_cidrs" {
+  type    = list(string)
+  default = ["10.10.10.0/24", "10.10.11.0/24", "10.10.12.0/24"]
+}
+variable "database_subnet_cidrs" {
+  type    = list(string)
+  default = ["10.10.20.0/24", "10.10.21.0/24", "10.10.22.0/24"]
+}
 variable "frontend_bucket_name" {
-  type = string
+  type    = string
+  default = "dev-cinevision-dev-frontend"
   validation {
     condition     = !strcontains(var.frontend_bucket_name, "BUCKET_NAME")
-    error_message = "frontend_bucket_name still contains BUCKET_NAME placeholder."
+    error_message = "frontend_bucket_name still contains  BUCKET_NAME placeholder."
   }
 }
 variable "logs_bucket_name" {
-  type = string
+  type    = string
+  default = "dev-cinevision-dev-logs"
   validation {
     condition     = !strcontains(var.logs_bucket_name, "BUCKET_NAME")
     error_message = "logs_bucket_name still contains BUCKET_NAME placeholder."
   }
 }
 variable "movie_posters_bucket_name" {
-  type = string
+  type    = string
+  default = "dev-cinevision-dev-movie-posters"
   validation {
     condition     = !strcontains(var.movie_posters_bucket_name, "BUCKET_NAME")
     error_message = "movie_posters_bucket_name still contains BUCKET_NAME placeholder."
   }
 }
 variable "email_archives_bucket_name" {
-  type = string
+  type    = string
+  default = "dev-cinevision-dev-email-archives"
   validation {
     condition     = !strcontains(var.email_archives_bucket_name, "BUCKET_NAME")
     error_message = "email_archives_bucket_name still contains BUCKET_NAME placeholder."
@@ -51,17 +80,56 @@ variable "node_groups" {
     disk_size      = number
     capacity_type  = string
   }))
+  default = {
+    general = {
+      instance_types = ["t3.large"]
+      desired_size   = 2
+      min_size       = 2
+      max_size       = 4
+      disk_size      = 50
+      capacity_type  = "ON_DEMAND"
+    }
+  }
 }
-variable "rds_instance_class" { type = string }
-variable "db_name" { type = string }
-variable "db_username" { type = string }
-variable "docdb_master_username" { type = string }
-variable "database_credentials_secret_name" { type = string }
-variable "application_secrets_secret_name" { type = string }
-variable "redis_node_type" { type = string }
-variable "msk_broker_count" { type = number }
-variable "msk_broker_instance_type" { type = string }
+variable "rds_instance_class" {
+  type    = string
+  default = "db.t4g.medium"
+}
+variable "db_name" {
+  type    = string
+  default = "cinevision"
+}
+variable "db_username" {
+  type    = string
+  default = "cinevision_admin"
+}
+variable "docdb_master_username" {
+  type    = string
+  default = "cinevision_docdb_admin"
+}
+variable "database_credentials_secret_name" {
+  type    = string
+  default = "/cinevision/dev/database-credentials"
+}
+variable "application_secrets_secret_name" {
+  type    = string
+  default = "/cinevision/dev/application-secrets"
+}
+variable "redis_node_type" {
+  type    = string
+  default = "cache.t4g.small"
+}
+variable "msk_broker_count" {
+  type    = number
+  default = 3
+}
+variable "msk_broker_instance_type" {
+  type    = string
+  default = "kafka.t3.small"
+}
 variable "tags" {
-  type    = map(string)
-  default = {}
+  type = map(string)
+  default = {
+    Owner = "platform-team"
+  }
 }

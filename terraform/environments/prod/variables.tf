@@ -1,39 +1,82 @@
-variable "project_name" { type = string }
+variable "project_name" {
+  type    = string
+  default = "cinevision"
+}
 variable "aws_profile" {
-  type = string
+  type    = string
+  default = "cinevision-prod"
   validation {
     condition     = length(trim(var.aws_profile, " ")) > 0
     error_message = "aws_profile must be set to a valid AWS CLI profile."
   }
 }
-variable "primary_region" { type = string }
-variable "dr_region" { type = string }
-variable "cidr_block" { type = string }
-variable "azs" { type = list(string) }
-variable "public_subnet_cidrs" { type = list(string) }
-variable "private_subnet_cidrs" { type = list(string) }
-variable "database_subnet_cidrs" { type = list(string) }
-variable "dr_cidr_block" { type = string }
-variable "dr_azs" { type = list(string) }
-variable "dr_public_subnet_cidrs" { type = list(string) }
-variable "dr_private_subnet_cidrs" { type = list(string) }
-variable "dr_database_subnet_cidrs" { type = list(string) }
+variable "primary_region" {
+  type    = string
+  default = "us-east-1"
+}
+variable "dr_region" {
+  type    = string
+  default = "us-west-2"
+}
+variable "cidr_block" {
+  type    = string
+  default = "10.30.0.0/16"
+}
+variable "azs" {
+  type    = list(string)
+  default = ["us-east-1a", "us-east-1b", "us-east-1c"]
+}
+variable "public_subnet_cidrs" {
+  type    = list(string)
+  default = ["10.30.0.0/24", "10.30.1.0/24", "10.30.2.0/24"]
+}
+variable "private_subnet_cidrs" {
+  type    = list(string)
+  default = ["10.30.10.0/24", "10.30.11.0/24", "10.30.12.0/24"]
+}
+variable "database_subnet_cidrs" {
+  type    = list(string)
+  default = ["10.30.20.0/24", "10.30.21.0/24", "10.30.22.0/24"]
+}
+variable "dr_cidr_block" {
+  type    = string
+  default = "10.31.0.0/16"
+}
+variable "dr_azs" {
+  type    = list(string)
+  default = ["us-west-2a", "us-west-2b", "us-west-2c"]
+}
+variable "dr_public_subnet_cidrs" {
+  type    = list(string)
+  default = ["10.31.0.0/24", "10.31.1.0/24", "10.31.2.0/24"]
+}
+variable "dr_private_subnet_cidrs" {
+  type    = list(string)
+  default = ["10.31.10.0/24", "10.31.11.0/24", "10.31.12.0/24"]
+}
+variable "dr_database_subnet_cidrs" {
+  type    = list(string)
+  default = ["10.31.20.0/24", "10.31.21.0/24", "10.31.22.0/24"]
+}
 variable "frontend_bucket_name" {
-  type = string
+  type    = string
+  default = "prod-cinevision-prod-frontend"
   validation {
     condition     = !strcontains(var.frontend_bucket_name, "BUCKET_NAME")
     error_message = "frontend_bucket_name still contains BUCKET_NAME placeholder."
   }
 }
 variable "logs_bucket_name" {
-  type = string
+  type    = string
+  default = "prod-cinevision-prod-logs"
   validation {
     condition     = !strcontains(var.logs_bucket_name, "BUCKET_NAME")
     error_message = "logs_bucket_name still contains BUCKET_NAME placeholder."
   }
 }
 variable "dr_frontend_bucket_name" {
-  type = string
+  type    = string
+  default = "prod-cinevision-prod-dr-frontend"
   validation {
     condition     = !strcontains(var.dr_frontend_bucket_name, "BUCKET_NAME")
     error_message = "dr_frontend_bucket_name still contains BUCKET_NAME placeholder."
@@ -49,18 +92,60 @@ variable "node_groups" {
     disk_size      = number
     capacity_type  = string
   }))
+  default = {
+    general = {
+      instance_types = ["m5.xlarge"]
+      desired_size   = 4
+      min_size       = 4
+      max_size       = 8
+      disk_size      = 120
+      capacity_type  = "ON_DEMAND"
+    }
+  }
 }
-variable "rds_instance_class" { type = string }
-variable "rds_dr_instance_class" { type = string }
-variable "db_name" { type = string }
-variable "db_username" { type = string }
-variable "docdb_master_username" { type = string }
-variable "database_credentials_secret_name" { type = string }
-variable "application_secrets_secret_name" { type = string }
-variable "redis_node_type" { type = string }
-variable "msk_broker_count" { type = number }
-variable "msk_broker_instance_type" { type = string }
+variable "rds_instance_class" {
+  type    = string
+  default = "db.r6g.large"
+}
+variable "rds_dr_instance_class" {
+  type    = string
+  default = "db.t4g.medium"
+}
+variable "db_name" {
+  type    = string
+  default = "cinevision"
+}
+variable "db_username" {
+  type    = string
+  default = "cinevision_admin"
+}
+variable "docdb_master_username" {
+  type    = string
+  default = "cinevision_docdb_admin"
+}
+variable "database_credentials_secret_name" {
+  type    = string
+  default = "/cinevision/prod/database-credentials"
+}
+variable "application_secrets_secret_name" {
+  type    = string
+  default = "/cinevision/prod/application-secrets"
+}
+variable "redis_node_type" {
+  type    = string
+  default = "cache.r6g.large"
+}
+variable "msk_broker_count" {
+  type    = number
+  default = 3
+}
+variable "msk_broker_instance_type" {
+  type    = string
+  default = "kafka.m5.large"
+}
 variable "tags" {
-  type    = map(string)
-  default = {}
+  type = map(string)
+  default = {
+    Owner = "platform-team"
+  }
 }

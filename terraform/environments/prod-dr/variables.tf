@@ -1,21 +1,35 @@
-variable "project_name" { type = string }
+variable "project_name" {
+  type    = string
+  default = "cinevision"
+}
 variable "aws_profile" {
-  type = string
+  type    = string
+  default = "cinevision-prod"
   validation {
     condition     = length(trim(var.aws_profile, " ")) > 0
     error_message = "aws_profile must be set to a valid AWS CLI profile."
   }
 }
-variable "primary_region" { type = string }
+variable "primary_region" {
+  type    = string
+  default = "us-west-2"
+}
 variable "prod_state_bucket" {
-  type = string
+  type    = string
+  default = "prod-dr-cinevision-terraform-state-prod"
   validation {
     condition     = !strcontains(var.prod_state_bucket, "ACCOUNT_ID")
     error_message = "prod_state_bucket still contains ACCOUNT_ID placeholder."
   }
 }
-variable "prod_state_key" { type = string }
-variable "prod_state_region" { type = string }
+variable "prod_state_key" {
+  type    = string
+  default = "terraform/prod/terraform.tfstate"
+}
+variable "prod_state_region" {
+  type    = string
+  default = "us-east-1"
+}
 variable "node_groups" {
   type = map(object({
     instance_types = list(string)
@@ -25,9 +39,24 @@ variable "node_groups" {
     disk_size      = number
     capacity_type  = string
   }))
+  default = {
+    general = {
+      instance_types = ["t3.large"]
+      desired_size   = 1
+      min_size       = 1
+      max_size       = 2
+      disk_size      = 50
+      capacity_type  = "ON_DEMAND"
+    }
+  }
 }
-variable "redis_node_type" { type = string }
+variable "redis_node_type" {
+  type    = string
+  default = "cache.t4g.small"
+}
 variable "tags" {
-  type    = map(string)
-  default = {}
+  type = map(string)
+  default = {
+    Owner = "platform-team"
+  }
 }
