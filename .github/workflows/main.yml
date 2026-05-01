@@ -44,36 +44,12 @@ jobs:
             scripts: ['scripts/**']
 
 # --------------------------------
-# 2. Determine Environment (For OIDC)
-# --------------------------------
-  determine-environment:
-    runs-on: ubuntu-latest
-    outputs:
-      aws_account_id: ${{ steps.set-env.outputs.aws_account_id }}
-      aws_role: ${{ steps.set-env.outputs.aws_role }}
-    steps:
-      - id: set-env
-        run: |
-          # Map branch to environment
-          if [[ "${{ github.base_ref }}" == "main" ]]; then
-            echo "aws_account_id=123456789012" >> $GITHUB_OUTPUT
-            echo "aws_role=terraform-prod-role" >> $GITHUB_OUTPUT
-          else
-            echo "aws_account_id=123456789012" >> $GITHUB_OUTPUT
-            echo "aws_role=terraform-dev-role" >> $GITHUB_OUTPUT
-          fi
-
-# --------------------------------
-# 3. Terraform Validation (Fixed)
+# 2. Terraform Validation (Using AWS Keys)
 # --------------------------------
   terraform-validation:
-    needs: [detect-changes, determine-environment]
+    needs: detect-changes
     if: needs.detect-changes.outputs.terraform == 'true'
     runs-on: ubuntu-latest
-    
-    permissions:
-      id-token: write   # Required for OIDC authentication
-      contents: read
 
     strategy:
       matrix:
@@ -87,19 +63,22 @@ jobs:
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
 
-      # Configure AWS credentials using OIDC (no hardcoded keys)
+      # Configure AWS credentials using IAM keys from GitHub Secrets
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::${{ needs.determine-environment.outputs.aws_account_id }}:role/${{ needs.determine-environment.outputs.aws_role }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
+          
+          # Optional: Add session name for better audit trails
           role-session-name: GitHubActions-Terraform-${{ matrix.env }}-${{ github.run_id }}
 
       # Format check (fast, no dependencies)
       - name: Terraform Format Check
         run: terraform fmt -recursive -check terraform/
 
-      # Conditional initialization based on environment
+      # Full initialization for non-prod environments
       - name: Terraform Init
         run: |
           set -e
@@ -160,7 +139,7 @@ jobs:
           retention-days: 7
 
 # --------------------------------
-# 4. Kubernetes Validation
+# 3. Kubernetes Validation
 # --------------------------------
   kubernetes-validation:
     needs: detect-changes
@@ -195,7 +174,7 @@ jobs:
           done
 
 # --------------------------------
-# 5. Services Validation
+# 4. Services Validation
 # --------------------------------
   services-validation:
     needs: detect-changes
@@ -250,7 +229,7 @@ jobs:
           retention-days: 7
 
 # --------------------------------
-# 6. Scripts Validation
+# 5. Scripts Validation
 # --------------------------------
   scripts-validation:
     needs: detect-changes
@@ -290,7 +269,7 @@ jobs:
           fi
 
 # --------------------------------
-# 7. Documentation Validation
+# 6. Documentation Validation
 # --------------------------------
   docs-validation:
     needs: detect-changes
@@ -308,7 +287,7 @@ jobs:
           base-branch: ${{ github.base_ref }}
 
 # --------------------------------
-# 8. Security Scan (Fixed)
+# 7. Security Scan
 # --------------------------------
   secrets-scan:
     runs-on: ubuntu-latest
@@ -335,7 +314,7 @@ jobs:
           gitleaks detect --source . --redact --verbose --exit-code 1
 
 # --------------------------------
-# 9. Quality Gate
+# 8. Quality Gate
 # --------------------------------
   quality-gate:
     needs:
@@ -392,3 +371,16 @@ jobs:
               repo: context.repo.repo,
               body: '❌ **Quality Gate Failed**\n\nOne or more validation jobs failed. Please check the workflow run for details.\n\nRun URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
             })
+
+# --------------------------------
+# 9. Optional: Rotate AWS Keys (Security Best Practice)
+# --------------------------------
+  rotate-aws-keys:
+    needs: quality-gate
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify about key rotation
+        run: |
+          echo "⚠️ AWS keys used in this workflow should be rotated regularly"
+          echo "Consider migrating to OIDC for better security"
