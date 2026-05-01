@@ -39,7 +39,7 @@ variable "frontend_bucket_name" {
   default = "dev-cinevision-dev-frontend"
   validation {
     condition     = !strcontains(var.frontend_bucket_name, "BUCKET_NAME")
-    error_message = "frontend_bucket_name still contains BUCKET_NAME placeholder."
+    error_message = "frontend_bucket_name still contains  BUCKET_NAME placeholder."
   }
 }
 variable "logs_bucket_name" {
