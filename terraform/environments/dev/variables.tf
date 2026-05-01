@@ -24,7 +24,7 @@ variable "logs_bucket_name" {
   type = string
   validation {
     condition     = !strcontains(var.logs_bucket_name, "BUCKET_NAME")
-    error_message = "logs_bucket_name still contains BUCKET_NAME placeholder."
+    error_message = "logs_bucket_name still contains  BUCKET_NAME placeholder."
   }
 }
 variable "movie_posters_bucket_name" {
