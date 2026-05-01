@@ -76,13 +76,28 @@ variable "logs_bucket_name" {
 }
 variable "dr_frontend_bucket_name" {
   type    = string
-  default = "prod-cinevision-prod-dr-frontend"
+  default = "prod-dr-cinevision-prod-dr-frontend"
   validation {
     condition     = !strcontains(var.dr_frontend_bucket_name, "BUCKET_NAME")
     error_message = "dr_frontend_bucket_name still contains BUCKET_NAME placeholder."
   }
 }
-
+variable "frontend_aliases" {
+  type    = list(string)
+  default = ["cinevisionca.link"]
+  validation {
+    condition     = alltrue([for a in var.frontend_aliases : !strcontains(a, "DOMAIN_NAME")])
+    error_message = "frontend_aliases contains DOMAIN_NAME placeholder."
+  }
+}
+variable "acm_certificate_arn" {
+  type    = string
+  default = "arn:aws:acm:us-east-1:211026994790:certificate/f0236af1-7cde-4b43-a947-32fb5e7c0309"
+  validation {
+    condition     = !strcontains(var.acm_certificate_arn, "ACCOUNT_ID") && !strcontains(var.acm_certificate_arn, "CERTIFICATE_ID")
+    error_message = "acm_certificate_arn still contains ACCOUNT_ID/CERTIFICATE_ID placeholder."
+  }
+}
 variable "node_groups" {
   type = map(object({
     instance_types = list(string)

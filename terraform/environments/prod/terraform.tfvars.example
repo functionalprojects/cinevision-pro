@@ -12,10 +12,11 @@ dr_azs                     = ["us-west-2a", "us-west-2b", "us-west-2c"]
 dr_public_subnet_cidrs     = ["10.31.0.0/24", "10.31.1.0/24", "10.31.2.0/24"]
 dr_private_subnet_cidrs    = ["10.31.10.0/24", "10.31.11.0/24", "10.31.12.0/24"]
 dr_database_subnet_cidrs   = ["10.31.20.0/24", "10.31.21.0/24", "10.31.22.0/24"]
-frontend_bucket_name       = "BUCKET_NAME-cinevision-prod-frontend"
-logs_bucket_name           = "BUCKET_NAME-cinevision-prod-logs"
-dr_frontend_bucket_name    = "BUCKET_NAME-cinevision-prod-dr-frontend"
-
+frontend_bucket_name       = "prod-cinevision-prod-frontend"
+logs_bucket_name           = "prod-cinevision-prod-logs"
+dr_frontend_bucket_name    = "prod-dr-cinevision-prod-dr-frontend"
+frontend_aliases           = ["DOMAIN_NAME"]
+acm_certificate_arn        = "arn:aws:acm:us-east-1:ACCOUNT_ID:certificate/PROD_CERTIFICATE_ID"
 rds_instance_class         = "db.r6g.large"
 rds_dr_instance_class      = "db.t4g.medium"
 db_name                    = "cinevision"

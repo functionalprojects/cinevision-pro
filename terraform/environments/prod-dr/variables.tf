@@ -16,7 +16,7 @@ variable "primary_region" {
 }
 variable "prod_state_bucket" {
   type    = string
-  default = "prod-dr-cinevision-terraform-state-prod"
+  default = "ACCOUNT_ID-cinevision-terraform-state-prod"
   validation {
     condition     = !strcontains(var.prod_state_bucket, "ACCOUNT_ID")
     error_message = "prod_state_bucket still contains ACCOUNT_ID placeholder."

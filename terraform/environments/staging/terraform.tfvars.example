@@ -7,9 +7,10 @@ azs                      = ["us-east-1a", "us-east-1b", "us-east-1c"]
 public_subnet_cidrs      = ["10.20.0.0/24", "10.20.1.0/24", "10.20.2.0/24"]
 private_subnet_cidrs     = ["10.20.10.0/24", "10.20.11.0/24", "10.20.12.0/24"]
 database_subnet_cidrs    = ["10.20.20.0/24", "10.20.21.0/24", "10.20.22.0/24"]
-frontend_bucket_name     = "BUCKET_NAME-cinevision-staging-frontend"
-logs_bucket_name         = "BUCKET_NAME-cinevision-staging-logs"
-
+frontend_bucket_name     = "staging-cinevision-staging-frontend"
+logs_bucket_name         = "staging-cinevision-staging-logs"
+frontend_aliases         = ["staging.DOMAIN_NAME"]
+acm_certificate_arn      = "arn:aws:acm:us-east-1:ACCOUNT_ID:certificate/STAGING_CERTIFICATE_ID"
 rds_instance_class       = "db.t4g.large"
 db_name                  = "cinevision"
 db_username              = "cinevision_admin"
