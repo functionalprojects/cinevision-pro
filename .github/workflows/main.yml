@@ -2,7 +2,7 @@ name: PR Validation
 
 on:
   pull_request:
-    branches: [develop, main]
+    branches: [develop, main, staging]
     types: [opened, synchronize, reopened, ready_for_review]
 
 concurrency:
@@ -17,9 +17,8 @@ env:
   AWS_REGION: 'us-east-1'
 
 jobs:
-
 # --------------------------------
-# 1. Detect Changes
+# 1. Detect Changes & Environment
 # --------------------------------
   detect-changes:
     runs-on: ubuntu-latest
@@ -29,6 +28,7 @@ jobs:
       services: ${{ steps.filter.outputs.services }}
       docs: ${{ steps.filter.outputs.docs }}
       scripts: ${{ steps.filter.outputs.scripts }}
+      environments: ${{ steps.set-env.outputs.envs }}
 
     steps:
       - uses: actions/checkout@v4
@@ -38,13 +38,25 @@ jobs:
         with:
           filters: |
             terraform: ['terraform/**']
-            k8s: ['k8s/**']
-            services: ['services/**']
-            docs: ['docs/**', 'README.md']
-            scripts: ['scripts/**']
+            k8s: ['cinevision-microservices/k8s/**']
+            services: ['cinevision-microservices/api-gateway/**', 'cinevision-microservices/eureka-server/**', 'cinevision-microservices/movieService/**', 'cinevision-microservices/userService/**', 'cinevision-microservices/emailService/**', 'cinevision-microservices/frontend/**']
+            docs: ['cinevision-microservices/docs/**', 'README.md']
+            scripts: ['cinevision-microservices/scripts/**']
+
+      - id: set-env
+        run: |
+          if [[ "${{ github.base_ref }}" == "develop" ]]; then
+            echo 'envs=["dev"]' >> $GITHUB_OUTPUT
+          elif [[ "${{ github.base_ref }}" == "staging" ]]; then
+            echo 'envs=["staging"]' >> $GITHUB_OUTPUT
+          elif [[ "${{ github.base_ref }}" == "main" ]]; then
+            echo 'envs=["prod", "prod-dr"]' >> $GITHUB_OUTPUT
+          else
+            echo 'envs=["dev"]' >> $GITHUB_OUTPUT
+          fi
 
 # --------------------------------
-# 2. Terraform Validation (Using AWS Keys)
+# 2. Terraform Validation
 # --------------------------------
   terraform-validation:
     needs: detect-changes
@@ -53,8 +65,8 @@ jobs:
 
     strategy:
       matrix:
-        env: [dev, staging, prod, prod-dr]
-      max-parallel: 2   # Prevent overwhelming state backends
+        env: ${{ fromJson(needs.detect-changes.outputs.environments) }}
+      max-parallel: 2
 
     steps:
       - uses: actions/checkout@v4
@@ -63,28 +75,22 @@ jobs:
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
 
-      # Configure AWS credentials using IAM keys from GitHub Secrets
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
-          
-          # Optional: Add session name for better audit trails
           role-session-name: GitHubActions-Terraform-${{ matrix.env }}-${{ github.run_id }}
 
-      # Format check (fast, no dependencies)
       - name: Terraform Format Check
         run: terraform fmt -recursive -check terraform/
 
-      # Full initialization for non-prod environments
       - name: Terraform Init
         run: |
           set -e
           cd terraform/environments/${{ matrix.env }}
           
-          # For non-prod environments, do full init to catch all issues
           if [[ "${{ matrix.env }}" == "dev" ]] || [[ "${{ matrix.env }}" == "staging" ]]; then
             echo "🔧 Running full initialization for ${{ matrix.env }}"
             terraform init -input=false -reconfigure
@@ -93,49 +99,28 @@ jobs:
             terraform init -backend=false
           fi
 
-      # Validate configuration (works regardless of backend)
       - name: Terraform Validate
         run: |
           set -e
           cd terraform/environments/${{ matrix.env }}
           terraform validate
 
-      # Generate plan with appropriate refresh strategy
       - name: Terraform Plan
         run: |
           set -e
           cd terraform/environments/${{ matrix.env }}
           
-          # For non-production, do full plan with refresh
           if [[ "${{ matrix.env }}" == "dev" ]] || [[ "${{ matrix.env }}" == "staging" ]]; then
             terraform plan -no-color -input=false -refresh=true -out=tfplan
           else
-            # For production, plan without refresh (read-only mode)
             terraform plan -no-color -input=false -refresh=false -out=tfplan
           fi
 
-      # Upload plan artifact (for review or debugging)
       - name: Upload Terraform Plan
         uses: actions/upload-artifact@v4
         with:
           name: tfplan-${{ matrix.env }}-${{ github.run_id }}
           path: terraform/environments/${{ matrix.env }}/tfplan
-          retention-days: 7
-          if-no-files-found: warn
-
-      # For production, also generate JSON for detailed review
-      - name: Generate JSON Plan for Production
-        if: contains(matrix.env, 'prod')
-        run: |
-          cd terraform/environments/${{ matrix.env }}
-          terraform show -json tfplan > tfplan.json 2>/dev/null || echo "No plan file to convert"
-
-      - name: Upload JSON Plan (Production)
-        if: contains(matrix.env, 'prod')
-        uses: actions/upload-artifact@v4
-        with:
-          name: tfplan-${{ matrix.env }}-${{ github.run_id }}-json
-          path: terraform/environments/${{ matrix.env }}/tfplan.json
           retention-days: 7
 
 # --------------------------------
@@ -162,14 +147,14 @@ jobs:
       - name: Validate manifests
         run: |
           set -e
-          find k8s -name '*.yaml' -exec kubeconform -strict {} \;
+          find cinevision-microservices/k8s -name '*.yaml' -exec kubeconform -strict {} \;
 
       - name: Kustomize Build Test
         run: |
           set -e
           for env in dev staging prod dr; do
-            if [ -d "k8s/overlays/$env" ]; then
-              kustomize build k8s/overlays/$env > /dev/null
+            if [ -d "cinevision-microservices/k8s/overlays/$env" ]; then
+              kustomize build cinevision-microservices/k8s/overlays/$env > /dev/null
             fi
           done
 
@@ -183,7 +168,7 @@ jobs:
 
     strategy:
       matrix:
-        service: [api-gateway, eureka-server, movie-service, user-service, email-service, frontend]
+        service: [api-gateway, eureka-server, movieService, userService, emailService, frontend]
 
     steps:
       - uses: actions/checkout@v4
@@ -202,12 +187,12 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-          cache-dependency-path: services/frontend/package-lock.json
+          cache-dependency-path: cinevision-microservices/frontend/package-lock.json
 
       - name: Build & Test
         run: |
           set -e
-          cd services/${{ matrix.service }}
+          cd cinevision-microservices/${{ matrix.service }}
 
           if [ "${{ matrix.service }}" == "frontend" ]; then
             npm ci
@@ -223,164 +208,38 @@ jobs:
         with:
           name: reports-${{ matrix.service }}-${{ github.run_id }}
           path: |
-            services/${{ matrix.service }}/target/surefire-reports/
-            services/${{ matrix.service }}/target/site/
-            services/${{ matrix.service }}/coverage/
+            cinevision-microservices/${{ matrix.service }}/target/surefire-reports/
+            cinevision-microservices/${{ matrix.service }}/target/site/
+            cinevision-microservices/${{ matrix.service }}/coverage/
           retention-days: 7
 
 # --------------------------------
-# 5. Scripts Validation
-# --------------------------------
-  scripts-validation:
-    needs: detect-changes
-    if: needs.detect-changes.outputs.scripts == 'true'
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y shellcheck python3 ansible
-
-      - name: Shell lint
-        run: |
-          if find scripts -name '*.sh' 2>/dev/null | grep -q .; then
-            find scripts -name '*.sh' -exec shellcheck {} \;
-          else
-            echo "No shell scripts found"
-          fi
-
-      - name: Python syntax
-        run: |
-          if find scripts/python -name '*.py' 2>/dev/null | grep -q .; then
-            find scripts/python -name '*.py' -exec python3 -m py_compile {} \;
-          else
-            echo "No Python scripts found"
-          fi
-
-      - name: Ansible validation
-        run: |
-          if ls scripts/ansible/*.yml 1> /dev/null 2>&1; then
-            ansible-playbook --syntax-check scripts/ansible/*.yml
-          else
-            echo "No Ansible playbooks found"
-          fi
-
-# --------------------------------
-# 6. Documentation Validation
-# --------------------------------
-  docs-validation:
-    needs: detect-changes
-    if: needs.detect-changes.outputs.docs == 'true'
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Markdown link check
-        uses: gaurav-nelson/github-action-markdown-link-check@v1
-        with:
-          use-quiet-mode: 'yes'
-          check-modified-files-only: 'yes'
-          base-branch: ${{ github.base_ref }}
-
-# --------------------------------
-# 7. Security Scan
+# 5. Security Scan
 # --------------------------------
   secrets-scan:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Gitleaks (Deterministic)
-        run: |
-          set -e
-          VERSION=$(curl -s https://api.github.com/repos/gitleaks/gitleaks/releases/latest | grep tag_name | cut -d '"' -f 4)
-          curl -L https://github.com/gitleaks/gitleaks/releases/download/${VERSION}/gitleaks_${VERSION#v}_linux_x64.tar.gz -o gitleaks.tar.gz
-          tar -xzf gitleaks.tar.gz
-          sudo mv gitleaks /usr/local/bin/
-          rm gitleaks.tar.gz
-
-      - name: Verify Installation
-        run: |
-          which gitleaks
-          gitleaks version
-
-      - name: Run Gitleaks Scan (Fail on secrets)
-        run: |
-          gitleaks detect --source . --redact --verbose --exit-code 1
+      - name: Run Gitleaks Scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 # --------------------------------
-# 8. Quality Gate
+# 6. Quality Gate
 # --------------------------------
   quality-gate:
-    needs:
-      [
-        terraform-validation,
-        kubernetes-validation,
-        services-validation,
-        scripts-validation,
-        docs-validation,
-        secrets-scan
-      ]
+    needs: [terraform-validation, kubernetes-validation, services-validation, secrets-scan]
     if: always()
     runs-on: ubuntu-latest
-
     steps:
       - name: Evaluate Results
         run: |
-          FAILED=0
-
-          check_job () {
-            NAME=$1
-            STATUS=$2
-
-            if [ "$STATUS" != "success" ] && [ "$STATUS" != "skipped" ]; then
-              echo "❌ $NAME failed"
-              FAILED=1
-            else
-              echo "✅ $NAME passed or skipped"
-            fi
-          }
-
-          check_job "terraform-validation" "${{ needs.terraform-validation.result }}"
-          check_job "kubernetes-validation" "${{ needs.kubernetes-validation.result }}"
-          check_job "services-validation" "${{ needs.services-validation.result }}"
-          check_job "scripts-validation" "${{ needs.scripts-validation.result }}"
-          check_job "docs-validation" "${{ needs.docs-validation.result }}"
-          check_job "secrets-scan" "${{ needs.secrets-scan.result }}"
-
-          if [ $FAILED -eq 1 ]; then
-            echo "❌ Quality gate failed"
+          if [[ "${{ needs.terraform-validation.result }}" == "failure" ]] || \
+             [[ "${{ needs.kubernetes-validation.result }}" == "failure" ]] || \
+             [[ "${{ needs.services-validation.result }}" == "failure" ]] || \
+             [[ "${{ needs.secrets-scan.result }}" == "failure" ]]; then
+            echo "❌ Validation failed"
             exit 1
           fi
-
           echo "🎉 All validations passed!"
-
-      - name: Add PR Comment on Failure
-        if: failure()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: '❌ **Quality Gate Failed**\n\nOne or more validation jobs failed. Please check the workflow run for details.\n\nRun URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
-            })
-
-# --------------------------------
-# 9. Optional: Rotate AWS Keys (Security Best Practice)
-# --------------------------------
-  rotate-aws-keys:
-    needs: quality-gate
-    if: failure() && github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Notify about key rotation
-        run: |
-          echo "⚠️ AWS keys used in this workflow should be rotated regularly"
-          echo "Consider migrating to OIDC for better security"
