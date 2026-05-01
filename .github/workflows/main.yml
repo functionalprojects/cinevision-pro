@@ -214,7 +214,65 @@ jobs:
           retention-days: 7
 
 # --------------------------------
-# 5. Security Scan
+# 5. Scripts Validation
+# --------------------------------
+  scripts-validation:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.scripts == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck python3 ansible
+
+      - name: Shell lint
+        run: |
+          if find cinevision-microservices/scripts -name '*.sh' 2>/dev/null | grep -q .; then
+            find cinevision-microservices/scripts -name '*.sh' -exec shellcheck {} \;
+          else
+            echo "No shell scripts found"
+          fi
+
+      - name: Python syntax
+        run: |
+          if find cinevision-microservices/scripts/python -name '*.py' 2>/dev/null | grep -q .; then
+            find cinevision-microservices/scripts/python -name '*.py' -exec python3 -m py_compile {} \;
+          else
+            echo "No Python scripts found"
+          fi
+
+      - name: Ansible validation
+        run: |
+          if ls cinevision-microservices/scripts/ansible/*.yml 1> /dev/null 2>&1; then
+            ansible-playbook --syntax-check cinevision-microservices/scripts/ansible/*.yml
+          else
+            echo "No Ansible playbooks found"
+          fi
+
+# --------------------------------
+# 6. Documentation Validation
+# --------------------------------
+  docs-validation:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.docs == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Markdown link check
+        uses: gaurav-nelson/github-action-markdown-link-check@v1
+        with:
+          use-quiet-mode: 'yes'
+          check-modified-files-only: 'yes'
+          base-branch: ${{ github.base_ref }}
+
+# --------------------------------
+# 7. Security Scan
 # --------------------------------
   secrets-scan:
     runs-on: ubuntu-latest
@@ -244,7 +302,7 @@ jobs:
 # 6. Quality Gate
 # --------------------------------
   quality-gate:
-    needs: [terraform-validation, kubernetes-validation, services-validation, secrets-scan]
+    needs: [terraform-validation, kubernetes-validation, services-validation, scripts-validation, docs-validation, secrets-scan]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -253,6 +311,8 @@ jobs:
           if [[ "${{ needs.terraform-validation.result }}" == "failure" ]] || \
              [[ "${{ needs.kubernetes-validation.result }}" == "failure" ]] || \
              [[ "${{ needs.services-validation.result }}" == "failure" ]] || \
+             [[ "${{ needs.scripts-validation.result }}" == "failure" ]] || \
+             [[ "${{ needs.docs-validation.result }}" == "failure" ]] || \
              [[ "${{ needs.secrets-scan.result }}" == "failure" ]]; then
             echo "❌ Validation failed"
             exit 1
