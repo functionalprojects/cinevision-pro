@@ -39,20 +39,7 @@ variable "dr_frontend_bucket_name" {
     error_message = "dr_frontend_bucket_name still contains BUCKET_NAME placeholder."
   }
 }
-variable "frontend_aliases" {
-  type = list(string)
-  validation {
-    condition     = alltrue([for a in var.frontend_aliases : !strcontains(a, "DOMAIN_NAME")])
-    error_message = "frontend_aliases contains DOMAIN_NAME placeholder."
-  }
-}
-variable "acm_certificate_arn" {
-  type = string
-  validation {
-    condition     = !strcontains(var.acm_certificate_arn, "ACCOUNT_ID") && !strcontains(var.acm_certificate_arn, "CERTIFICATE_ID")
-    error_message = "acm_certificate_arn still contains ACCOUNT_ID/CERTIFICATE_ID placeholder."
-  }
-}
+
 variable "node_groups" {
   type = map(object({
     instance_types = list(string)

@@ -24,16 +24,6 @@ variable "enable_replication" {
   default = false
 }
 
-variable "aliases" {
-  type    = list(string)
-  default = []
-}
-
-variable "acm_certificate_arn" {
-  type    = string
-  default = null
-}
-
 variable "price_class" {
   type    = string
   default = "PriceClass_100"

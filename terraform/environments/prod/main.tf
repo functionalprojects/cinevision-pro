@@ -88,8 +88,7 @@ module "s3_cloudfront" {
   frontend_bucket_name    = var.frontend_bucket_name
   logs_bucket_name        = var.logs_bucket_name
   dr_frontend_bucket_name = var.dr_frontend_bucket_name
-  aliases                 = var.frontend_aliases
-  acm_certificate_arn     = var.acm_certificate_arn
+
   enable_replication      = true
   tags                    = local.tags
 }
