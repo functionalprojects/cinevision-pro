@@ -71,7 +71,7 @@ variable "frontend_aliases" {
   default = ["dev.cinevisionca.link"]
   validation {
     condition     = alltrue([for a in var.frontend_aliases : !strcontains(a, "DOMAIN_NAME")])
-    error_message = "frontend_aliases contains  DOMAIN_NAME placeholder."
+    error_message = "frontend_aliases contains DOMAIN_NAME placeholder."
   }
 }
 variable "acm_certificate_arn" {
