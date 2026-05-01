@@ -31,7 +31,7 @@ variable "movie_posters_bucket_name" {
   type = string
   validation {
     condition     = !strcontains(var.movie_posters_bucket_name, "BUCKET_NAME")
-    error_message = "movie_posters_bucket_name still contains BUCKET_NAME placeholder."
+    error_message = "movie_posters_bucket_name still contains  BUCKET_NAME placeholder."
   }
 }
 variable "email_archives_bucket_name" {
