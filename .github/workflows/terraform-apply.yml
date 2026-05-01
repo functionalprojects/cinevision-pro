@@ -1,134 +1,57 @@
-name: Terraform GitOps - Environment Promotion & Destroy
+name: Terraform Lifecycle (Apply then Destroy)
 
-# -----------------------------------------
-# TRIGGERS (NOW PATH-BASED)
-# -----------------------------------------
 on:
   push:
-    branches:
-      - develop
-      - main
-      - release/**
-    paths:
-      - 'terraform/**'                       # ONLY trigger on Terraform changes
-      - '.github/workflows/terraform-*'      # Optional: allow pipeline updates
-
-  pull_request:
-    types: [closed]
-    branches:
-      - develop
-      - main
-    paths:
-      - 'terraform/**'                       #  Only if Terraform changed in PR
-
-  # 🔥 Manual trigger (independent of paths)
+    branches: [develop, staging, main]
+    paths: ['terraform/**']
   workflow_dispatch:
     inputs:
       environment:
-        description: "Environment to destroy (dev/staging/prod)"
+        description: 'Environment to target'
         required: true
+        default: 'dev'
         type: choice
         options:
           - dev
           - staging
           - prod
+          - prod-dr
 
-      confirm_destroy:
-        description: "Type 'DESTROY' to confirm irreversible action"
-        required: true
-        type: string
-
-# -----------------------------------------
-# GLOBAL VARIABLES
-# -----------------------------------------
 env:
   TERRAFORM_VERSION: '1.6.6'
   AWS_REGION: 'us-east-1'
 
-# -----------------------------------------
-# CONCURRENCY CONTROL
-# -----------------------------------------
-concurrency:
-  group: terraform-${{ github.ref_name }}
-  cancel-in-progress: false
-
-# -----------------------------------------
-# PERMISSIONS
-# -----------------------------------------
-permissions:
-  id-token: write
-  contents: read
-  pull-requests: write
-  deployments: write
-  statuses: write
-
-# =========================================
-# JOBS START HERE (UNCHANGED LOGIC)
-# =========================================
 jobs:
-
-# -----------------------------------------
-# 1. DETERMINE ENVIRONMENT
-# -----------------------------------------
-  determine-environment:
+# --------------------------------
+# 1. Setup Logic
+# --------------------------------
+  setup:
     runs-on: ubuntu-latest
     outputs:
-      environment: ${{ steps.env.outputs.environment }}
-      aws_account_id: ${{ steps.env.outputs.aws_account_id }}
-      aws_role: ${{ steps.env.outputs.aws_role }}
-      requires_approval: ${{ steps.env.outputs.requires_approval }}
-
+      env: ${{ steps.mapping.outputs.env }}
     steps:
-      - name: Map branch or manual input to environment
-        id: env
+      - id: mapping
         run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            ENV="${{ github.event.inputs.environment }}"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "env=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
           else
-            BRANCH="${GITHUB_REF_NAME}"
-
-            if [[ "$BRANCH" == "develop" ]]; then
-              ENV="dev"
-            elif [[ "$BRANCH" == "main" ]]; then
-              ENV="prod"
-            elif [[ "$BRANCH" == release/* ]]; then
-              ENV="staging"
-            else
-              echo "❌ Unsupported branch"
-              exit 1
+            if [[ "${{ github.ref_name }}" == "develop" ]]; then
+              echo 'env=dev' >> $GITHUB_OUTPUT
+            elif [[ "${{ github.ref_name }}" == "staging" ]]; then
+              echo 'env=staging' >> $GITHUB_OUTPUT
+            elif [[ "${{ github.ref_name }}" == "main" ]]; then
+              echo 'env=prod' >> $GITHUB_OUTPUT
             fi
           fi
 
-          echo "environment=$ENV" >> $GITHUB_OUTPUT
-
-          if [[ "$ENV" == "dev" ]]; then
-            echo "aws_account_id=${{ secrets.DEV_AWS_ACCOUNT_ID }}" >> $GITHUB_OUTPUT
-            echo "aws_role=terraform-dev-role" >> $GITHUB_OUTPUT
-            echo "requires_approval=false" >> $GITHUB_OUTPUT
-
-          elif [[ "$ENV" == "staging" ]]; then
-            echo "aws_account_id=${{ secrets.STAGING_AWS_ACCOUNT_ID }}" >> $GITHUB_OUTPUT
-            echo "aws_role=terraform-staging-role" >> $GITHUB_OUTPUT
-            echo "requires_approval=true" >> $GITHUB_OUTPUT
-
-          elif [[ "$ENV" == "prod" ]]; then
-            echo "aws_account_id=${{ secrets.PROD_AWS_ACCOUNT_ID }}" >> $GITHUB_OUTPUT
-            echo "aws_role=terraform-prod-role" >> $GITHUB_OUTPUT
-            echo "requires_approval=true" >> $GITHUB_OUTPUT
-          fi
-
-# -----------------------------------------
-# 2. TERRAFORM PLAN
-# -----------------------------------------
-  terraform-plan:
-    needs: determine-environment
+# --------------------------------
+# 2. Terraform Apply
+# --------------------------------
+  terraform-apply:
+    needs: setup
     runs-on: ubuntu-latest
-    environment:
-      name: ${{ needs.determine-environment.outputs.environment }}
-
-    outputs:
-      has_changes: ${{ steps.plan.outputs.changes }}
-
+    environment: ${{ needs.setup.outputs.env }} # Manual approval for apply
+    
     steps:
       - uses: actions/checkout@v4
 
@@ -139,131 +62,79 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::${{ needs.determine-environment.outputs.aws_account_id }}:role/${{ needs.determine-environment.outputs.aws_role }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Terraform Init
-        working-directory: terraform/environments/${{ needs.determine-environment.outputs.environment }}
-        run: terraform init -reconfigure
-
-      - name: Terraform Plan
-        id: plan
-        working-directory: terraform/environments/${{ needs.determine-environment.outputs.environment }}
         run: |
-          terraform plan -detailed-exitcode -out=tfplan
-          EXIT=$?
-
-          if [ $EXIT -eq 2 ]; then
-            echo "changes=true" >> $GITHUB_OUTPUT
-          else
-            echo "changes=false" >> $GITHUB_OUTPUT
-          fi
-
-          exit 0
-
-      - name: Upload Plan Artifact
-        if: steps.plan.outputs.changes == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: tfplan-${{ needs.determine-environment.outputs.environment }}
-          path: terraform/environments/${{ needs.determine-environment.outputs.environment }}/tfplan
-
-# -----------------------------------------
-# 3. APPROVAL GATE
-# -----------------------------------------
-  approval-gate:
-    needs: [determine-environment, terraform-plan]
-    if: needs.determine-environment.outputs.requires_approval == 'true'
-    runs-on: ubuntu-latest
-    environment:
-      name: ${{ needs.determine-environment.outputs.environment }}
-
-    steps:
-      - run: echo "⏳ Waiting for approval..."
-
-# -----------------------------------------
-# 4. APPLY
-# -----------------------------------------
-  terraform-apply:
-    needs: [determine-environment, terraform-plan, approval-gate]
-    if: |
-      needs.terraform-plan.outputs.has_changes == 'true' &&
-      (needs.determine-environment.outputs.requires_approval == 'false' || needs.approval-gate.result == 'success')
-
-    runs-on: ubuntu-latest
-    environment:
-      name: ${{ needs.determine-environment.outputs.environment }}
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TERRAFORM_VERSION }}
-
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::${{ needs.determine-environment.outputs.aws_account_id }}:role/${{ needs.determine-environment.outputs.aws_role }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Terraform Init
-        working-directory: terraform/environments/${{ needs.determine-environment.outputs.environment }}
-        run: terraform init -reconfigure
-
-      - name: Download Plan
-        uses: actions/download-artifact@v4
-        with:
-          name: tfplan-${{ needs.determine-environment.outputs.environment }}
-          path: terraform/environments/${{ needs.determine-environment.outputs.environment }}
+          cd terraform/environments/${{ needs.setup.outputs.env }}
+          terraform init -input=false -reconfigure
 
       - name: Terraform Apply
-        working-directory: terraform/environments/${{ needs.determine-environment.outputs.environment }}
-        run: terraform apply -auto-approve tfplan
-
-# -----------------------------------------
-# 5. DESTROY (MANUAL ONLY)
-# -----------------------------------------
-  terraform-destroy:
-    if: github.event_name == 'workflow_dispatch'
-    needs: determine-environment
-    runs-on: ubuntu-latest
-    environment:
-      name: ${{ needs.determine-environment.outputs.environment }}
-
-    steps:
-      - name: Confirm destruction
         run: |
-          if [ "${{ github.event.inputs.confirm_destroy }}" != "DESTROY" ]; then
-            echo "❌ Confirmation failed"
-            exit 1
-          fi
+          cd terraform/environments/${{ needs.setup.outputs.env }}
+          terraform apply -auto-approve -input=false
 
+# --------------------------------
+# 3. Terraform Destroy (Manual Approval Required)
+# --------------------------------
+  terraform-destroy:
+    needs: [setup, terraform-apply]
+    runs-on: ubuntu-latest
+    # Using a specific "destroy" environment for the manual gate
+    environment: 
+      name: ${{ needs.setup.outputs.env }}-destroy
+    
+    steps:
       - uses: actions/checkout@v4
 
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::${{ needs.determine-environment.outputs.aws_account_id }}:role/${{ needs.determine-environment.outputs.aws_role }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - run: terraform init -reconfigure
-        working-directory: terraform/environments/${{ needs.determine-environment.outputs.environment }}
+      - name: Terraform Init
+        run: |
+          cd terraform/environments/${{ needs.setup.outputs.env }}
+          terraform init -input=false -reconfigure
 
-      - run: terraform destroy -auto-approve
-        working-directory: terraform/environments/${{ needs.determine-environment.outputs.environment }}
+      - name: Terraform Destroy
+        run: |
+          cd terraform/environments/${{ needs.setup.outputs.env }}
+          terraform destroy -auto-approve -input=false
 
-# -----------------------------------------
-# 6. NOTIFY
-# -----------------------------------------
-  notify:
-    needs: terraform-apply
+# --------------------------------
+# 4. Handle Production DR Apply (Parallel to Prod Apply)
+# --------------------------------
+  terraform-apply-dr:
+    needs: setup
+    if: needs.setup.outputs.env == 'prod'
     runs-on: ubuntu-latest
-    if: always()
-
+    environment: prod-dr
+    
     steps:
-      - run: |
-          echo "Environment: ${{ needs.determine-environment.outputs.environment }}"
-          echo "Status: ${{ needs.terraform-apply.result }}"
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Terraform Init
+        run: |
+          cd terraform/environments/prod-dr
+          terraform init -input=false -reconfigure
+      - name: Terraform Apply
+        run: |
+          cd terraform/environments/prod-dr
+          terraform apply -auto-approve -input=false
