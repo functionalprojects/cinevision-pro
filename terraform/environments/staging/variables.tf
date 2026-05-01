@@ -4,11 +4,7 @@ variable "project_name" {
 }
 variable "aws_profile" {
   type    = string
-  default = "cinevision-staging"
-  validation {
-    condition     = length(trim(var.aws_profile, " ")) > 0
-    error_message = "aws_profile must be set to a valid AWS CLI profile."
-  }
+  default = null
 }
 variable "primary_region" {
   type    = string
