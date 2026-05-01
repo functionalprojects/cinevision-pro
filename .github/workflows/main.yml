@@ -218,12 +218,27 @@ jobs:
 # --------------------------------
   secrets-scan:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
-      - name: Run Gitleaks Scan
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Gitleaks (Deterministic)
+        run: |
+          set -e
+          VERSION=$(curl -s https://api.github.com/repos/gitleaks/gitleaks/releases/latest | grep tag_name | cut -d '"' -f 4)
+          curl -L https://github.com/gitleaks/gitleaks/releases/download/${VERSION}/gitleaks_${VERSION#v}_linux_x64.tar.gz -o gitleaks.tar.gz
+          tar -xzf gitleaks.tar.gz
+          sudo mv gitleaks /usr/local/bin/
+          rm gitleaks.tar.gz
+
+      - name: Verify Installation
+        run: |
+          which gitleaks
+          gitleaks version
+
+      - name: Run Gitleaks Scan (Fail on secrets)
+        run: |
+          gitleaks detect --source . --redact --verbose --exit-code 1
 
 # --------------------------------
 # 6. Quality Gate
