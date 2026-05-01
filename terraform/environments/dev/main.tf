@@ -68,8 +68,8 @@ module "s3_cloudfront" {
   frontend_bucket_name = var.frontend_bucket_name
   logs_bucket_name     = var.logs_bucket_name
 
-  enable_replication   = false
-  tags                 = local.tags
+  enable_replication = false
+  tags               = local.tags
 }
 
 module "movie_posters_s3" {

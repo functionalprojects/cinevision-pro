@@ -89,8 +89,8 @@ module "s3_cloudfront" {
   logs_bucket_name        = var.logs_bucket_name
   dr_frontend_bucket_name = var.dr_frontend_bucket_name
 
-  enable_replication      = true
-  tags                    = local.tags
+  enable_replication = true
+  tags               = local.tags
 }
 
 module "eks" {
