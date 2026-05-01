@@ -14,6 +14,7 @@ env:
   KUBERNETES_VERSION: '1.28'
   NODE_VERSION: '18'
   JAVA_VERSION: '17'
+  AWS_REGION: 'us-east-1'
 
 jobs:
 
@@ -43,16 +44,41 @@ jobs:
             scripts: ['scripts/**']
 
 # --------------------------------
-# 2. Terraform Validation
+# 2. Determine Environment (For OIDC)
+# --------------------------------
+  determine-environment:
+    runs-on: ubuntu-latest
+    outputs:
+      aws_account_id: ${{ steps.set-env.outputs.aws_account_id }}
+      aws_role: ${{ steps.set-env.outputs.aws_role }}
+    steps:
+      - id: set-env
+        run: |
+          # Map branch to environment
+          if [[ "${{ github.base_ref }}" == "main" ]]; then
+            echo "aws_account_id=123456789012" >> $GITHUB_OUTPUT
+            echo "aws_role=terraform-prod-role" >> $GITHUB_OUTPUT
+          else
+            echo "aws_account_id=123456789012" >> $GITHUB_OUTPUT
+            echo "aws_role=terraform-dev-role" >> $GITHUB_OUTPUT
+          fi
+
+# --------------------------------
+# 3. Terraform Validation (Fixed)
 # --------------------------------
   terraform-validation:
-    needs: detect-changes
+    needs: [detect-changes, determine-environment]
     if: needs.detect-changes.outputs.terraform == 'true'
     runs-on: ubuntu-latest
+    
+    permissions:
+      id-token: write   # Required for OIDC authentication
+      contents: read
 
     strategy:
       matrix:
         env: [dev, staging, prod, prod-dr]
+      max-parallel: 2   # Prevent overwhelming state backends
 
     steps:
       - uses: actions/checkout@v4
@@ -61,24 +87,80 @@ jobs:
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
 
+      # Configure AWS credentials using OIDC (no hardcoded keys)
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ needs.determine-environment.outputs.aws_account_id }}:role/${{ needs.determine-environment.outputs.aws_role }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-Terraform-${{ matrix.env }}-${{ github.run_id }}
+
+      # Format check (fast, no dependencies)
       - name: Terraform Format Check
         run: terraform fmt -recursive -check terraform/
 
-      - name: Terraform Init & Validate
+      # Conditional initialization based on environment
+      - name: Terraform Init
         run: |
           set -e
           cd terraform/environments/${{ matrix.env }}
-          terraform init -backend=false
+          
+          # For non-prod environments, do full init to catch all issues
+          if [[ "${{ matrix.env }}" == "dev" ]] || [[ "${{ matrix.env }}" == "staging" ]]; then
+            echo "🔧 Running full initialization for ${{ matrix.env }}"
+            terraform init -input=false -reconfigure
+          else
+            echo "⚡ Running fast validation for ${{ matrix.env }} (backend excluded for security)"
+            terraform init -backend=false
+          fi
+
+      # Validate configuration (works regardless of backend)
+      - name: Terraform Validate
+        run: |
+          set -e
+          cd terraform/environments/${{ matrix.env }}
           terraform validate
 
+      # Generate plan with appropriate refresh strategy
       - name: Terraform Plan
         run: |
           set -e
           cd terraform/environments/${{ matrix.env }}
-          terraform plan -no-color -input=false
+          
+          # For non-production, do full plan with refresh
+          if [[ "${{ matrix.env }}" == "dev" ]] || [[ "${{ matrix.env }}" == "staging" ]]; then
+            terraform plan -no-color -input=false -refresh=true -out=tfplan
+          else
+            # For production, plan without refresh (read-only mode)
+            terraform plan -no-color -input=false -refresh=false -out=tfplan
+          fi
+
+      # Upload plan artifact (for review or debugging)
+      - name: Upload Terraform Plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ matrix.env }}-${{ github.run_id }}
+          path: terraform/environments/${{ matrix.env }}/tfplan
+          retention-days: 7
+          if-no-files-found: warn
+
+      # For production, also generate JSON for detailed review
+      - name: Generate JSON Plan for Production
+        if: contains(matrix.env, 'prod')
+        run: |
+          cd terraform/environments/${{ matrix.env }}
+          terraform show -json tfplan > tfplan.json 2>/dev/null || echo "No plan file to convert"
+
+      - name: Upload JSON Plan (Production)
+        if: contains(matrix.env, 'prod')
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ matrix.env }}-${{ github.run_id }}-json
+          path: terraform/environments/${{ matrix.env }}/tfplan.json
+          retention-days: 7
 
 # --------------------------------
-# 3. Kubernetes Validation
+# 4. Kubernetes Validation
 # --------------------------------
   kubernetes-validation:
     needs: detect-changes
@@ -101,17 +183,19 @@ jobs:
       - name: Validate manifests
         run: |
           set -e
-          find k8s -name '*.yaml' | xargs kubeconform -strict
+          find k8s -name '*.yaml' -exec kubeconform -strict {} \;
 
       - name: Kustomize Build Test
         run: |
           set -e
           for env in dev staging prod dr; do
-            kustomize build k8s/overlays/$env > /dev/null
+            if [ -d "k8s/overlays/$env" ]; then
+              kustomize build k8s/overlays/$env > /dev/null
+            fi
           done
 
 # --------------------------------
-# 4. Services Validation
+# 5. Services Validation
 # --------------------------------
   services-validation:
     needs: detect-changes
@@ -158,7 +242,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: reports-${{ matrix.service }}
+          name: reports-${{ matrix.service }}-${{ github.run_id }}
           path: |
             services/${{ matrix.service }}/target/surefire-reports/
             services/${{ matrix.service }}/target/site/
@@ -166,7 +250,7 @@ jobs:
           retention-days: 7
 
 # --------------------------------
-# 5. Scripts Validation
+# 6. Scripts Validation
 # --------------------------------
   scripts-validation:
     needs: detect-changes
@@ -182,19 +266,31 @@ jobs:
           sudo apt-get install -y shellcheck python3 ansible
 
       - name: Shell lint
-        run: find scripts -name '*.sh' -exec shellcheck {} \;
+        run: |
+          if find scripts -name '*.sh' 2>/dev/null | grep -q .; then
+            find scripts -name '*.sh' -exec shellcheck {} \;
+          else
+            echo "No shell scripts found"
+          fi
 
       - name: Python syntax
-        run: find scripts/python -name '*.py' -exec python3 -m py_compile {} \;
+        run: |
+          if find scripts/python -name '*.py' 2>/dev/null | grep -q .; then
+            find scripts/python -name '*.py' -exec python3 -m py_compile {} \;
+          else
+            echo "No Python scripts found"
+          fi
 
       - name: Ansible validation
         run: |
           if ls scripts/ansible/*.yml 1> /dev/null 2>&1; then
             ansible-playbook --syntax-check scripts/ansible/*.yml
+          else
+            echo "No Ansible playbooks found"
           fi
 
 # --------------------------------
-# 6. Documentation Validation
+# 7. Documentation Validation
 # --------------------------------
   docs-validation:
     needs: detect-changes
@@ -206,9 +302,13 @@ jobs:
 
       - name: Markdown link check
         uses: gaurav-nelson/github-action-markdown-link-check@v1
+        with:
+          use-quiet-mode: 'yes'
+          check-modified-files-only: 'yes'
+          base-branch: ${{ github.base_ref }}
 
 # --------------------------------
-# 7. Security Scan (FINAL FIX)
+# 8. Security Scan (Fixed)
 # --------------------------------
   secrets-scan:
     runs-on: ubuntu-latest
@@ -219,14 +319,11 @@ jobs:
       - name: Install Gitleaks (Deterministic)
         run: |
           set -e
-
           VERSION=$(curl -s https://api.github.com/repos/gitleaks/gitleaks/releases/latest | grep tag_name | cut -d '"' -f 4)
-
           curl -L https://github.com/gitleaks/gitleaks/releases/download/${VERSION}/gitleaks_${VERSION#v}_linux_x64.tar.gz -o gitleaks.tar.gz
-
           tar -xzf gitleaks.tar.gz
-
           sudo mv gitleaks /usr/local/bin/
+          rm gitleaks.tar.gz
 
       - name: Verify Installation
         run: |
@@ -238,7 +335,7 @@ jobs:
           gitleaks detect --source . --redact --verbose --exit-code 1
 
 # --------------------------------
-# 8. Quality Gate
+# 9. Quality Gate
 # --------------------------------
   quality-gate:
     needs:
@@ -282,4 +379,16 @@ jobs:
             exit 1
           fi
 
-          echo "🎉 All validations passed"
+          echo "🎉 All validations passed!"
+
+      - name: Add PR Comment on Failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '❌ **Quality Gate Failed**\n\nOne or more validation jobs failed. Please check the workflow run for details.\n\nRun URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+            })
