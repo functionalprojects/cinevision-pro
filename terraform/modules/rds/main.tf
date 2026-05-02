@@ -52,8 +52,8 @@ resource "aws_db_instance" "primary" {
   backup_retention_period      = var.backup_retention_period
   backup_window                = "02:00-03:00"
   maintenance_window           = "Sun:03:00-Sun:04:00"
-  deletion_protection          = true
-  skip_final_snapshot          = false
+  deletion_protection          = false
+  skip_final_snapshot          = true
   final_snapshot_identifier    = "${var.identifier}-final-snapshot"
   performance_insights_enabled = true
 
@@ -84,7 +84,7 @@ resource "aws_db_instance" "dr_replica" {
   backup_retention_period = var.backup_retention_period
   storage_encrypted       = true
   publicly_accessible     = false
-  deletion_protection     = true
+  deletion_protection     = false
 
   tags = merge(local.common_tags, {
     Role = "dr-replica"
