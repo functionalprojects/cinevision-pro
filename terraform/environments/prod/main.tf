@@ -198,6 +198,7 @@ module "documentdb" {
     aws.dr = aws.dr
   }
 
+  identifier            = "${var.project_name}-${local.environment}-docdb"
   cluster_name          = "${var.project_name}-${local.environment}-docdb"
   master_username       = try(local.database_credentials.docdb_master_username, var.docdb_master_username)
   master_password       = local.database_credentials.docdb_master_password

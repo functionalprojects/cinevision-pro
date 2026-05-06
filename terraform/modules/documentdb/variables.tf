@@ -1,3 +1,8 @@
+variable "identifier" {
+  type = string
+}
+
+
 variable "cluster_name" {
   type = string
 }

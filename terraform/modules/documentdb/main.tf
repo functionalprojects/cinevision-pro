@@ -51,8 +51,10 @@ resource "aws_docdb_cluster" "primary" {
   preferred_backup_window         = var.preferred_backup_window
   storage_encrypted               = true
   global_cluster_identifier       = var.enable_global_cluster ? aws_docdb_global_cluster.this[0].id : null
-  deletion_protection             = true
+  deletion_protection             = false
   apply_immediately               = true
+  skip_final_snapshot             = false
+  final_snapshot_identifier       = "${var.identifier}-final-snapshot"
 
   tags = local.common_tags
 }
