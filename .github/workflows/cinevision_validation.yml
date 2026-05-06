@@ -1,0 +1,320 @@
+name: PR Validation
+
+on:
+  pull_request:
+    branches: [develop, main, staging]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: pr-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TERRAFORM_VERSION: '1.6.6'
+  KUBERNETES_VERSION: '1.28'
+  NODE_VERSION: '18'
+  JAVA_VERSION: '17'
+  AWS_REGION: 'us-east-1'
+
+jobs:
+# --------------------------------
+# 1. Detect Changes & Environment
+# --------------------------------
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      terraform: ${{ steps.filter.outputs.terraform }}
+      k8s: ${{ steps.filter.outputs.k8s }}
+      services: ${{ steps.filter.outputs.services }}
+      docs: ${{ steps.filter.outputs.docs }}
+      scripts: ${{ steps.filter.outputs.scripts }}
+      environments: ${{ steps.set-env.outputs.envs }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v2
+        id: filter
+        with:
+          filters: |
+            terraform: ['terraform/**']
+            k8s: ['cinevision-microservices/k8s/**']
+            services: ['cinevision-microservices/api-gateway/**', 'cinevision-microservices/eureka-server/**', 'cinevision-microservices/movieService/**', 'cinevision-microservices/userService/**', 'cinevision-microservices/emailService/**', 'cinevision-microservices/frontend/**']
+            docs: ['cinevision-microservices/docs/**', 'README.md']
+            scripts: ['cinevision-microservices/scripts/**']
+
+      - id: set-env
+        run: |
+          if [[ "${{ github.base_ref }}" == "develop" ]]; then
+            echo 'envs=["dev"]' >> $GITHUB_OUTPUT
+          elif [[ "${{ github.base_ref }}" == "staging" ]]; then
+            echo 'envs=["staging"]' >> $GITHUB_OUTPUT
+          elif [[ "${{ github.base_ref }}" == "main" ]]; then
+            echo 'envs=["prod", "prod-dr"]' >> $GITHUB_OUTPUT
+          else
+            echo 'envs=["dev"]' >> $GITHUB_OUTPUT
+          fi
+
+# --------------------------------
+# 2. Terraform Validation
+# --------------------------------
+  terraform-validation:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.terraform == 'true'
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        env: ${{ fromJson(needs.detect-changes.outputs.environments) }}
+      max-parallel: 2
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-Terraform-${{ matrix.env }}-${{ github.run_id }}
+
+      - name: Terraform Format Check
+        run: terraform fmt -recursive -check terraform/
+
+      - name: Terraform Init
+        run: |
+          set -e
+          cd terraform/environments/${{ matrix.env }}
+          
+          if [[ "${{ matrix.env }}" == "dev" ]] || [[ "${{ matrix.env }}" == "staging" ]]; then
+            echo "🔧 Running full initialization for ${{ matrix.env }}"
+            terraform init -input=false -reconfigure
+          else
+            echo "⚡ Running fast validation for ${{ matrix.env }} (backend excluded for security)"
+            terraform init -backend=false
+          fi
+
+      - name: Terraform Validate
+        run: |
+          set -e
+          cd terraform/environments/${{ matrix.env }}
+          terraform validate
+
+      - name: Terraform Plan
+        run: |
+          set -e
+          cd terraform/environments/${{ matrix.env }}
+          
+          if [[ "${{ matrix.env }}" == "dev" ]] || [[ "${{ matrix.env }}" == "staging" ]]; then
+            terraform plan -no-color -input=false -refresh=true -out=tfplan
+          else
+            terraform plan -no-color -input=false -refresh=false -out=tfplan
+          fi
+
+      - name: Upload Terraform Plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ matrix.env }}-${{ github.run_id }}
+          path: terraform/environments/${{ matrix.env }}/tfplan
+          retention-days: 7
+
+# --------------------------------
+# 3. Kubernetes Validation
+# --------------------------------
+  kubernetes-validation:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.k8s == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kubeconform
+        run: |
+          curl -L https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | tar xz
+          sudo mv kubeconform /usr/local/bin/
+
+      - name: Install kustomize
+        run: |
+          curl -s https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh | bash
+          sudo mv kustomize /usr/local/bin/
+
+      - name: Validate manifests
+        run: |
+          set -e
+          find cinevision-microservices/k8s -name '*.yaml' -exec kubeconform -strict {} \;
+
+      - name: Kustomize Build Test
+        run: |
+          set -e
+          for env in dev staging prod dr; do
+            if [ -d "cinevision-microservices/k8s/overlays/$env" ]; then
+              kustomize build cinevision-microservices/k8s/overlays/$env > /dev/null
+            fi
+          done
+
+# --------------------------------
+# 4. Services Validation
+# --------------------------------
+  services-validation:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.services == 'true'
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        service: [api-gateway, eureka-server, movieService, userService, emailService, frontend]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java
+        if: matrix.service != 'frontend'
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Setup Node
+        if: matrix.service == 'frontend'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: cinevision-microservices/frontend/package-lock.json
+
+      - name: Build & Test
+        run: |
+          set -e
+          cd cinevision-microservices/${{ matrix.service }}
+
+          if [ "${{ matrix.service }}" == "frontend" ]; then
+            npm ci
+            npm run test --if-present
+            npm run build
+          else
+            mvn -B clean test
+          fi
+
+      - name: Upload Test Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-${{ matrix.service }}-${{ github.run_id }}
+          path: |
+            cinevision-microservices/${{ matrix.service }}/target/surefire-reports/
+            cinevision-microservices/${{ matrix.service }}/target/site/
+            cinevision-microservices/${{ matrix.service }}/coverage/
+          retention-days: 7
+
+# --------------------------------
+# 5. Scripts Validation
+# --------------------------------
+  scripts-validation:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.scripts == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck python3 ansible
+
+      - name: Shell lint
+        run: |
+          if find cinevision-microservices/scripts -name '*.sh' 2>/dev/null | grep -q .; then
+            find cinevision-microservices/scripts -name '*.sh' -exec shellcheck {} \;
+          else
+            echo "No shell scripts found"
+          fi
+
+      - name: Python syntax
+        run: |
+          if find cinevision-microservices/scripts/python -name '*.py' 2>/dev/null | grep -q .; then
+            find cinevision-microservices/scripts/python -name '*.py' -exec python3 -m py_compile {} \;
+          else
+            echo "No Python scripts found"
+          fi
+
+      - name: Ansible validation
+        run: |
+          if ls cinevision-microservices/scripts/ansible/*.yml 1> /dev/null 2>&1; then
+            ansible-playbook --syntax-check cinevision-microservices/scripts/ansible/*.yml
+          else
+            echo "No Ansible playbooks found"
+          fi
+
+# --------------------------------
+# 6. Documentation Validation
+# --------------------------------
+  docs-validation:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.docs == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Markdown link check
+        uses: gaurav-nelson/github-action-markdown-link-check@v1
+        with:
+          use-quiet-mode: 'yes'
+          check-modified-files-only: 'yes'
+          base-branch: ${{ github.base_ref }}
+
+# --------------------------------
+# 7. Security Scan
+# --------------------------------
+  secrets-scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Gitleaks (Deterministic)
+        run: |
+          set -e
+          VERSION=$(curl -s https://api.github.com/repos/gitleaks/gitleaks/releases/latest | grep tag_name | cut -d '"' -f 4)
+          curl -L https://github.com/gitleaks/gitleaks/releases/download/${VERSION}/gitleaks_${VERSION#v}_linux_x64.tar.gz -o gitleaks.tar.gz
+          tar -xzf gitleaks.tar.gz
+          sudo mv gitleaks /usr/local/bin/
+          rm gitleaks.tar.gz
+
+      - name: Verify Installation
+        run: |
+          which gitleaks
+          gitleaks version
+
+      - name: Run Gitleaks Scan (Fail on secrets)
+        run: |
+          gitleaks detect --source . --redact --verbose --exit-code 1
+
+# --------------------------------
+# 6. Quality Gate
+# --------------------------------
+  quality-gate:
+    needs: [terraform-validation, kubernetes-validation, services-validation, scripts-validation, docs-validation, secrets-scan]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate Results
+        run: |
+          if [[ "${{ needs.terraform-validation.result }}" == "failure" ]] || \
+             [[ "${{ needs.kubernetes-validation.result }}" == "failure" ]] || \
+             [[ "${{ needs.services-validation.result }}" == "failure" ]] || \
+             [[ "${{ needs.scripts-validation.result }}" == "failure" ]] || \
+             [[ "${{ needs.docs-validation.result }}" == "failure" ]] || \
+             [[ "${{ needs.secrets-scan.result }}" == "failure" ]]; then
+            echo "❌ Validation failed"
+            exit 1
+          fi
+          echo "🎉 All validations passed!"
