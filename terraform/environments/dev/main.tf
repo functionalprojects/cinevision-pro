@@ -79,7 +79,7 @@ module "movie_posters_s3" {
   bucket_name  = var.movie_posters_bucket_name
   environment  = local.environment
   project_name = var.project_name
-  is_public    = true
+  is_public    = false
   tags         = local.tags
 }
 
@@ -92,6 +92,41 @@ module "email_archives_s3" {
   is_public    = false
   tags         = local.tags
 }
+
+# CloudFront for movie posters
+module "movie_posters_cloudfront" {
+  source = "../../modules/s3-cloudfront"
+
+  providers = {
+    aws    = aws
+    aws.dr = aws.dr
+  }
+
+  project_name         = var.project_name
+  environment          = local.environment
+  frontend_bucket_name = module.movie_posters_s3.bucket_name
+  logs_bucket_name     = var.logs_bucket_name
+  price_class          = var.price_class
+  tags                 = local.tags
+}
+
+# CloudFront for email archives
+module "email_archives_cloudfront" {
+  source = "../../modules/s3-cloudfront"
+
+  providers = {
+    aws    = aws
+    aws.dr = aws.dr
+  }
+
+  project_name         = var.project_name
+  environment          = local.environment
+  frontend_bucket_name = module.email_archives_s3.bucket_name
+  logs_bucket_name     = var.logs_bucket_name
+  price_class          = var.price_class
+  tags                 = local.tags
+}
+
 
 module "eks" {
   source = "../../modules/eks"
