@@ -38,8 +38,6 @@ resource "aws_docdb_global_cluster" "this" {
   engine                    = "docdb"
   engine_version            = "5.0.0"
   storage_encrypted         = true
-
-  # tags = local.common_tags
 }
 
 resource "aws_docdb_cluster" "primary" {
@@ -53,10 +51,8 @@ resource "aws_docdb_cluster" "primary" {
   preferred_backup_window         = var.preferred_backup_window
   storage_encrypted               = true
   global_cluster_identifier       = var.enable_global_cluster ? aws_docdb_global_cluster.this[0].id : null
-  deletion_protection             = false
+  deletion_protection             = true
   apply_immediately               = true
-  skip_final_snapshot             = true
-  final_snapshot_identifier       = "${var.cluster_name}-final-snapshot"
 
   tags = local.common_tags
 }
@@ -88,10 +84,8 @@ resource "aws_docdb_cluster" "dr" {
   db_subnet_group_name      = aws_docdb_subnet_group.dr[0].name
   vpc_security_group_ids    = var.dr_security_group_ids
   storage_encrypted         = true
-  deletion_protection       = false
+  deletion_protection       = true
   apply_immediately         = true
-  skip_final_snapshot       = true
-  final_snapshot_identifier = "${var.cluster_name}-dr-final-snapshot"
 
   tags = merge(local.common_tags, {
     Role = "dr-secondary"

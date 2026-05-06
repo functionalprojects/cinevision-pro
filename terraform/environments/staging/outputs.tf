@@ -10,14 +10,6 @@ output "cloudfront_domain_name" {
   value = module.s3_cloudfront.cloudfront_domain_name
 }
 
-output "movie_posters_bucket_name" {
-  value = module.movie_posters_s3.bucket_name
-}
-
-output "email_archives_bucket_name" {
-  value = module.email_archives_s3.bucket_name
-}
-
 output "eks_cluster_name" {
   value = module.eks.cluster_name
 }

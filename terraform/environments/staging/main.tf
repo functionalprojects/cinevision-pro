@@ -21,7 +21,7 @@ provider "aws" {
 }
 
 locals {
-  environment = "dev"
+  environment = "staging"
   tags = merge(var.tags, {
     Environment = local.environment
     CostCenter  = "engineering"
@@ -50,7 +50,7 @@ module "vpc" {
   public_subnet_cidrs   = var.public_subnet_cidrs
   private_subnet_cidrs  = var.private_subnet_cidrs
   database_subnet_cidrs = var.database_subnet_cidrs
-  single_nat_gateway    = true
+  single_nat_gateway    = false
   enable_nat_gateway    = true
   tags                  = local.tags
 }
@@ -101,7 +101,6 @@ module "movie_posters_cloudfront" {
     aws.dr = aws.dr
   }
 
-
   project_name                         = var.project_name
   environment                          = local.environment
   frontend_bucket_name                 = module.movie_posters_s3.bucket_name
@@ -111,11 +110,7 @@ module "movie_posters_cloudfront" {
   existing_bucket_id                   = module.movie_posters_s3.bucket_name
   existing_bucket_arn                  = module.movie_posters_s3.bucket_arn
   existing_bucket_regional_domain_name = module.movie_posters_s3.bucket_regional_domain_name
-
-  # price_class          = var.price_class
-
-  tags = local.tags
-
+  tags                                 = local.tags
 }
 
 module "email_archives_cloudfront" {
@@ -126,7 +121,6 @@ module "email_archives_cloudfront" {
     aws.dr = aws.dr
   }
 
-
   project_name                         = var.project_name
   environment                          = local.environment
   frontend_bucket_name                 = module.email_archives_s3.bucket_name
@@ -136,11 +130,7 @@ module "email_archives_cloudfront" {
   existing_bucket_id                   = module.email_archives_s3.bucket_name
   existing_bucket_arn                  = module.email_archives_s3.bucket_arn
   existing_bucket_regional_domain_name = module.email_archives_s3.bucket_regional_domain_name
-
-  # price_class          = var.price_class
-
-  tags = local.tags
-
+  tags                                 = local.tags
 }
 
 module "eks" {
@@ -172,7 +162,7 @@ module "rds" {
   subnet_ids              = module.vpc.database_subnet_ids
   security_group_ids      = [module.vpc.rds_security_group_id]
   create_dr_replica       = false
-  backup_retention_period = 7
+  backup_retention_period = 14
   tags                    = local.tags
 }
 
