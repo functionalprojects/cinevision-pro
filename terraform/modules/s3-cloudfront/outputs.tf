@@ -1,9 +1,9 @@
 output "frontend_bucket_name" {
-  value = aws_s3_bucket.frontend.bucket
+  value = var.frontend_bucket_name
 }
 
 output "logs_bucket_name" {
-  value = aws_s3_bucket.logs.bucket
+  value = var.logs_bucket_name
 }
 
 output "dr_frontend_bucket_name" {

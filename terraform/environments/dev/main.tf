@@ -106,10 +106,12 @@ module "movie_posters_cloudfront" {
   environment          = local.environment
   frontend_bucket_name = module.movie_posters_s3.bucket_name
   logs_bucket_name     = var.logs_bucket_name
+  create_bucket        = false
+  create_logs_bucket   = false
 
   # price_class          = var.price_class
 
-  tags                 = local.tags
+  tags = local.tags
 }
 
 # CloudFront for email archives
@@ -125,10 +127,12 @@ module "email_archives_cloudfront" {
   environment          = local.environment
   frontend_bucket_name = module.email_archives_s3.bucket_name
   logs_bucket_name     = var.logs_bucket_name
+  create_bucket        = false
+  create_logs_bucket   = false
 
   # price_class          = var.price_class
 
-  tags                 = local.tags
+  tags = local.tags
 }
 
 

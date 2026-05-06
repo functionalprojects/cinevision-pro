@@ -39,6 +39,16 @@ variable "price_class" {
   default = "PriceClass_100"
 }
 
+variable "create_bucket" {
+  type    = bool
+  default = true
+}
+
+variable "create_logs_bucket" {
+  type    = bool
+  default = true
+}
+
 variable "tags" {
   type    = map(string)
   default = {}
