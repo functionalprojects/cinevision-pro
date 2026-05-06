@@ -137,7 +137,9 @@ pipeline {
     PROD_GREEN_OVERLAY = 'k8s/overlays/prod/green'
     
     // API URLs
-    DEV_API_URL      = 'https://dev-api.cinevision.link'
+
+    DEV_API_URL      = 'https://dev-api.cinevisionca.link'
+
     STAGING_API_URL  = 'https://staging-api.cinevision.com'
     PROD_API_URL     = 'https://api.cinevision.com'
     

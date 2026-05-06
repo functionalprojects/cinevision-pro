@@ -106,7 +106,7 @@ module "movie_posters_cloudfront" {
   environment          = local.environment
   frontend_bucket_name = module.movie_posters_s3.bucket_name
   logs_bucket_name     = var.logs_bucket_name
-  price_class          = var.price_class
+  # price_class          = var.price_class
   tags                 = local.tags
 }
 
@@ -123,7 +123,7 @@ module "email_archives_cloudfront" {
   environment          = local.environment
   frontend_bucket_name = module.email_archives_s3.bucket_name
   logs_bucket_name     = var.logs_bucket_name
-  price_class          = var.price_class
+  # price_class          = var.price_class
   tags                 = local.tags
 }
 

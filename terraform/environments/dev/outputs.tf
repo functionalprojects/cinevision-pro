@@ -1,19 +1,3 @@
-output "movie_posters_cloudfront_domain_name" {
-  value = module.movie_posters_cloudfront.cloudfront_domain_name
-}
-
-output "movie_posters_cloudfront_distribution_id" {
-  value = module.movie_posters_cloudfront.cloudfront_distribution_id
-}
-
-output "email_archives_cloudfront_domain_name" {
-  value = module.email_archives_cloudfront.cloudfront_domain_name
-}
-
-output "email_archives_cloudfront_distribution_id" {
-  value = module.email_archives_cloudfront.cloudfront_distribution_id
-}
-
 output "vpc_id" {
   value = module.vpc.vpc_id
 }
