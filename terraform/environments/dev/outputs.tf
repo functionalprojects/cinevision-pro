@@ -1,4 +1,19 @@
-output "vpc_id" {
+output "movie_posters_cloudfront_domain_name" {
+  value = module.movie_posters_cloudfront.cloudfront_domain_name
+}
+
+output "movie_posters_cloudfront_distribution_id" {
+  value = module.movie_posters_cloudfront.cloudfront_distribution_id
+}
+
+output "email_archives_cloudfront_domain_name" {
+  value = module.email_archives_cloudfront.cloudfront_domain_name
+}
+
+output "email_archives_cloudfront_distribution_id" {
+  value = module.email_archives_cloudfront.cloudfront_distribution_id
+}
+
   value = module.vpc.vpc_id
 }
 
@@ -8,6 +23,10 @@ output "frontend_bucket_name" {
 
 output "cloudfront_domain_name" {
   value = module.s3_cloudfront.cloudfront_domain_name
+}
+
+output "cloudfront_distribution_id" {
+  value = module.s3_cloudfront.cloudfront_distribution_id
 }
 
 output "movie_posters_bucket_name" {

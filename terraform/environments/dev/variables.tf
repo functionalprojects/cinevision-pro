@@ -36,7 +36,7 @@ variable "database_subnet_cidrs" {
 }
 variable "frontend_bucket_name" {
   type    = string
-  default = "dev-cinevision-dev-frontend"
+  default = "cinevision-dev-frontend"
   validation {
     condition     = !strcontains(var.frontend_bucket_name, "BUCKET_NAME")
     error_message = "frontend_bucket_name still contains  BUCKET_NAME placeholder."
@@ -44,7 +44,7 @@ variable "frontend_bucket_name" {
 }
 variable "logs_bucket_name" {
   type    = string
-  default = "dev-cinevision-dev-logs"
+  default = "cinevision-dev-logs"
   validation {
     condition     = !strcontains(var.logs_bucket_name, "BUCKET_NAME")
     error_message = "logs_bucket_name still contains BUCKET_NAME placeholder."
@@ -52,7 +52,7 @@ variable "logs_bucket_name" {
 }
 variable "movie_posters_bucket_name" {
   type    = string
-  default = "dev-cinevision-dev-movie-posters"
+  default = "cinevision-dev-movie-posters"
   validation {
     condition     = !strcontains(var.movie_posters_bucket_name, "BUCKET_NAME")
     error_message = "movie_posters_bucket_name still contains BUCKET_NAME placeholder."
@@ -60,7 +60,7 @@ variable "movie_posters_bucket_name" {
 }
 variable "email_archives_bucket_name" {
   type    = string
-  default = "dev-cinevision-dev-email-archives"
+  default = "cinevision-dev-email-archives"
   validation {
     condition     = !strcontains(var.email_archives_bucket_name, "BUCKET_NAME")
     error_message = "email_archives_bucket_name still contains BUCKET_NAME placeholder."
