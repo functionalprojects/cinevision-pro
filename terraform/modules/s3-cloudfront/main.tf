@@ -13,9 +13,16 @@ locals {
     ManagedBy = "Terraform"
   })
 
-  frontend_bucket_id                   = var.create_bucket ? aws_s3_bucket.frontend[0].id : var.existing_bucket_id
-  frontend_bucket_arn                  = var.create_bucket ? aws_s3_bucket.frontend[0].arn : var.existing_bucket_arn
-  frontend_bucket_regional_domain_name = var.create_bucket ? aws_s3_bucket.frontend[0].bucket_regional_domain_name : var.existing_bucket_regional_domain_name
+
+  frontend_bucket_id                   = var.create_bucket ? aws_s3_bucket.frontend[0].id : data.aws_s3_bucket.frontend[0].id
+  frontend_bucket_arn                  = var.create_bucket ? aws_s3_bucket.frontend[0].arn : data.aws_s3_bucket.frontend[0].arn
+  frontend_bucket_regional_domain_name = var.create_bucket ? aws_s3_bucket.frontend[0].bucket_regional_domain_name : data.aws_s3_bucket.frontend[0].bucket_regional_domain_name
+}
+
+data "aws_s3_bucket" "frontend" {
+  count  = var.create_bucket ? 0 : 1
+  bucket = var.frontend_bucket_name
+
 }
 
 resource "aws_s3_bucket" "frontend" {

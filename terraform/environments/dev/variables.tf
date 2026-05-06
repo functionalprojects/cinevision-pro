@@ -141,6 +141,6 @@ variable "msk_broker_instance_type" {
 variable "tags" {
   type = map(string)
   default = {
-    Owner = "platform-team"
+    Owner = "platform-team1"
   }
 }
