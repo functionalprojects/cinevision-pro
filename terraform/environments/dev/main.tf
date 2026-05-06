@@ -102,12 +102,15 @@ module "movie_posters_cloudfront" {
   }
 
 
-  project_name         = var.project_name
-  environment          = local.environment
-  frontend_bucket_name = module.movie_posters_s3.bucket_name
-  logs_bucket_name     = var.logs_bucket_name
-  create_bucket        = false
-  create_logs_bucket   = false
+  project_name                         = var.project_name
+  environment                          = local.environment
+  frontend_bucket_name                 = module.movie_posters_s3.bucket_name
+  logs_bucket_name                     = var.logs_bucket_name
+  create_bucket                        = false
+  create_logs_bucket                   = false
+  existing_bucket_id                   = module.movie_posters_s3.bucket_name
+  existing_bucket_arn                  = module.movie_posters_s3.bucket_arn
+  existing_bucket_regional_domain_name = module.movie_posters_s3.bucket_regional_domain_name
 
   # price_class          = var.price_class
 
@@ -124,12 +127,15 @@ module "email_archives_cloudfront" {
   }
 
 
-  project_name         = var.project_name
-  environment          = local.environment
-  frontend_bucket_name = module.email_archives_s3.bucket_name
-  logs_bucket_name     = var.logs_bucket_name
-  create_bucket        = false
-  create_logs_bucket   = false
+  project_name                         = var.project_name
+  environment                          = local.environment
+  frontend_bucket_name                 = module.email_archives_s3.bucket_name
+  logs_bucket_name                     = var.logs_bucket_name
+  create_bucket                        = false
+  create_logs_bucket                   = false
+  existing_bucket_id                   = module.email_archives_s3.bucket_name
+  existing_bucket_arn                  = module.email_archives_s3.bucket_arn
+  existing_bucket_regional_domain_name = module.email_archives_s3.bucket_regional_domain_name
 
   # price_class          = var.price_class
 
