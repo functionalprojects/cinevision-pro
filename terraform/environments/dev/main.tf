@@ -109,7 +109,7 @@ module "movie_posters_cloudfront" {
 
   # price_class          = var.price_class
 
-  tags                 = local.tags
+  tags = local.tags
 }
 
 # CloudFront for email archives
@@ -128,7 +128,7 @@ module "email_archives_cloudfront" {
 
   # price_class          = var.price_class
 
-  tags                 = local.tags
+  tags = local.tags
 }
 
 
