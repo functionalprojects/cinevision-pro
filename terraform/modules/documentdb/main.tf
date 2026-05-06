@@ -38,8 +38,6 @@ resource "aws_docdb_global_cluster" "this" {
   engine                    = "docdb"
   engine_version            = "5.0.0"
   storage_encrypted         = true
-
-  tags = local.common_tags
 }
 
 resource "aws_docdb_cluster" "primary" {
