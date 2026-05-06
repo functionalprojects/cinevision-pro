@@ -21,7 +21,7 @@ provider "aws" {
 }
 
 locals {
-  environment = "dev"
+  environment = "staging"
   tags = merge(var.tags, {
     Environment = local.environment
     CostCenter  = "engineering"
@@ -50,7 +50,7 @@ module "vpc" {
   public_subnet_cidrs   = var.public_subnet_cidrs
   private_subnet_cidrs  = var.private_subnet_cidrs
   database_subnet_cidrs = var.database_subnet_cidrs
-  single_nat_gateway    = true
+  single_nat_gateway    = false
   enable_nat_gateway    = true
   tags                  = local.tags
 }
@@ -162,7 +162,7 @@ module "rds" {
   subnet_ids              = module.vpc.database_subnet_ids
   security_group_ids      = [module.vpc.rds_security_group_id]
   create_dr_replica       = false
-  backup_retention_period = 7
+  backup_retention_period = 14
   tags                    = local.tags
 }
 

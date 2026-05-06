@@ -21,10 +21,11 @@ provider "aws" {
 }
 
 locals {
-  environment = "dev"
+  environment = "prod"
   tags = merge(var.tags, {
     Environment = local.environment
-    CostCenter  = "engineering"
+    CostCenter  = "production"
+    Tier        = "critical"
   })
 }
 
@@ -50,9 +51,28 @@ module "vpc" {
   public_subnet_cidrs   = var.public_subnet_cidrs
   private_subnet_cidrs  = var.private_subnet_cidrs
   database_subnet_cidrs = var.database_subnet_cidrs
-  single_nat_gateway    = true
+  single_nat_gateway    = false
   enable_nat_gateway    = true
   tags                  = local.tags
+}
+
+module "dr_vpc" {
+  source = "../../modules/vpc"
+
+  providers = {
+    aws = aws.dr
+  }
+
+  project_name          = var.project_name
+  environment           = "prod-dr-foundation"
+  cidr_block            = var.dr_cidr_block
+  azs                   = var.dr_azs
+  public_subnet_cidrs   = var.dr_public_subnet_cidrs
+  private_subnet_cidrs  = var.dr_private_subnet_cidrs
+  database_subnet_cidrs = var.dr_database_subnet_cidrs
+  single_nat_gateway    = true
+  enable_nat_gateway    = true
+  tags                  = merge(local.tags, { RegionRole = "dr" })
 }
 
 module "s3_cloudfront" {
@@ -63,14 +83,15 @@ module "s3_cloudfront" {
     aws.dr = aws.dr
   }
 
-  project_name         = var.project_name
-  environment          = local.environment
-  frontend_bucket_name = var.frontend_bucket_name
-  logs_bucket_name     = var.logs_bucket_name
-  aliases              = var.frontend_aliases
-  acm_certificate_arn  = var.acm_certificate_arn
-  enable_replication   = false
-  tags                 = local.tags
+  project_name            = var.project_name
+  environment             = local.environment
+  frontend_bucket_name    = var.frontend_bucket_name
+  logs_bucket_name        = var.logs_bucket_name
+  dr_frontend_bucket_name = var.dr_frontend_bucket_name
+  aliases                 = var.frontend_aliases
+  acm_certificate_arn     = var.acm_certificate_arn
+  enable_replication      = true
+  tags                    = local.tags
 }
 
 module "movie_posters_s3" {
@@ -161,8 +182,11 @@ module "rds" {
   instance_class          = var.rds_instance_class
   subnet_ids              = module.vpc.database_subnet_ids
   security_group_ids      = [module.vpc.rds_security_group_id]
-  create_dr_replica       = false
-  backup_retention_period = 7
+  create_dr_replica       = true
+  dr_instance_class       = var.rds_dr_instance_class
+  dr_subnet_ids           = module.dr_vpc.database_subnet_ids
+  dr_security_group_ids   = [module.dr_vpc.rds_security_group_id]
+  backup_retention_period = 30
   tags                    = local.tags
 }
 
@@ -179,8 +203,11 @@ module "documentdb" {
   master_password       = local.database_credentials.docdb_master_password
   subnet_ids            = module.vpc.database_subnet_ids
   security_group_ids    = [module.vpc.documentdb_security_group_id]
-  enable_global_cluster = false
-  instance_count        = 2
+  enable_global_cluster = true
+  instance_count        = 3
+  dr_subnet_ids         = module.dr_vpc.database_subnet_ids
+  dr_security_group_ids = [module.dr_vpc.documentdb_security_group_id]
+  dr_instance_count     = 1
   tags                  = local.tags
 }
 

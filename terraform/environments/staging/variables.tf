@@ -16,7 +16,7 @@ variable "dr_region" {
 }
 variable "cidr_block" {
   type    = string
-  default = "10.10.0.0/16"
+  default = "10.20.0.0/16"
 }
 variable "azs" {
   type    = list(string)
@@ -24,27 +24,27 @@ variable "azs" {
 }
 variable "public_subnet_cidrs" {
   type    = list(string)
-  default = ["10.10.0.0/24", "10.10.1.0/24", "10.10.2.0/24"]
+  default = ["10.20.0.0/24", "10.20.1.0/24", "10.20.2.0/24"]
 }
 variable "private_subnet_cidrs" {
   type    = list(string)
-  default = ["10.10.10.0/24", "10.10.11.0/24", "10.10.12.0/24"]
+  default = ["10.20.10.0/24", "10.20.11.0/24", "10.20.12.0/24"]
 }
 variable "database_subnet_cidrs" {
   type    = list(string)
-  default = ["10.10.20.0/24", "10.10.21.0/24", "10.10.22.0/24"]
+  default = ["10.20.20.0/24", "10.20.21.0/24", "10.20.22.0/24"]
 }
 variable "frontend_bucket_name" {
   type    = string
-  default = "dev-cinevision-dev-frontend"
+  default = "staging-cinevision-staging-frontend"
   validation {
     condition     = !strcontains(var.frontend_bucket_name, "BUCKET_NAME")
-    error_message = "frontend_bucket_name still contains  BUCKET_NAME placeholder."
+    error_message = "frontend_bucket_name still contains BUCKET_NAME placeholder."
   }
 }
 variable "logs_bucket_name" {
   type    = string
-  default = "dev-cinevision-dev-logs"
+  default = "staging-cinevision-staging-logs"
   validation {
     condition     = !strcontains(var.logs_bucket_name, "BUCKET_NAME")
     error_message = "logs_bucket_name still contains BUCKET_NAME placeholder."
@@ -52,7 +52,7 @@ variable "logs_bucket_name" {
 }
 variable "movie_posters_bucket_name" {
   type    = string
-  default = "dev-cinevision-dev-movie-posters"
+  default = "staging-cinevision-staging-movie-posters"
   validation {
     condition     = !strcontains(var.movie_posters_bucket_name, "BUCKET_NAME")
     error_message = "movie_posters_bucket_name still contains BUCKET_NAME placeholder."
@@ -60,7 +60,7 @@ variable "movie_posters_bucket_name" {
 }
 variable "email_archives_bucket_name" {
   type    = string
-  default = "dev-cinevision-dev-email-archives"
+  default = "staging-cinevision-staging-email-archives"
   validation {
     condition     = !strcontains(var.email_archives_bucket_name, "BUCKET_NAME")
     error_message = "email_archives_bucket_name still contains BUCKET_NAME placeholder."
@@ -68,7 +68,7 @@ variable "email_archives_bucket_name" {
 }
 variable "frontend_aliases" {
   type    = list(string)
-  default = ["dev.cinevisionca.link"]
+  default = ["staging.cinevisionca.link"]
   validation {
     condition     = alltrue([for a in var.frontend_aliases : !strcontains(a, "DOMAIN_NAME")])
     error_message = "frontend_aliases contains DOMAIN_NAME placeholder."
@@ -93,18 +93,18 @@ variable "node_groups" {
   }))
   default = {
     general = {
-      instance_types = ["t3.large"]
-      desired_size   = 2
-      min_size       = 2
-      max_size       = 4
-      disk_size      = 50
+      instance_types = ["m5.large"]
+      desired_size   = 3
+      min_size       = 3
+      max_size       = 6
+      disk_size      = 80
       capacity_type  = "ON_DEMAND"
     }
   }
 }
 variable "rds_instance_class" {
   type    = string
-  default = "db.t4g.medium"
+  default = "db.t4g.large"
 }
 variable "db_name" {
   type    = string
@@ -120,15 +120,15 @@ variable "docdb_master_username" {
 }
 variable "database_credentials_secret_name" {
   type    = string
-  default = "/cinevision/dev/database-credentials"
+  default = "/cinevision/staging/database-credentials"
 }
 variable "application_secrets_secret_name" {
   type    = string
-  default = "/cinevision/dev/application-secrets"
+  default = "/cinevision/staging/application-secrets"
 }
 variable "redis_node_type" {
   type    = string
-  default = "cache.t4g.small"
+  default = "cache.t4g.medium"
 }
 variable "msk_broker_count" {
   type    = number
@@ -136,7 +136,7 @@ variable "msk_broker_count" {
 }
 variable "msk_broker_instance_type" {
   type    = string
-  default = "kafka.t3.small"
+  default = "kafka.m5.large"
 }
 variable "tags" {
   type = map(string)

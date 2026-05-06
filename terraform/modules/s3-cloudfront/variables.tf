@@ -39,6 +39,43 @@ variable "price_class" {
   default = "PriceClass_100"
 }
 
+variable "create_bucket" {
+  type    = bool
+  default = true
+}
+
+variable "create_logs_bucket" {
+  type    = bool
+  default = true
+}
+
+variable "existing_bucket_id" {
+  type    = string
+  default = null
+  validation {
+    condition     = var.create_bucket || try(trim(var.existing_bucket_id, " ") != "", false)
+    error_message = "When create_bucket is false, existing_bucket_id must be provided."
+  }
+}
+
+variable "existing_bucket_arn" {
+  type    = string
+  default = null
+  validation {
+    condition     = var.create_bucket || try(trim(var.existing_bucket_arn, " ") != "", false)
+    error_message = "When create_bucket is false, existing_bucket_arn must be provided."
+  }
+}
+
+variable "existing_bucket_regional_domain_name" {
+  type    = string
+  default = null
+  validation {
+    condition     = var.create_bucket || try(trim(var.existing_bucket_regional_domain_name, " ") != "", false)
+    error_message = "When create_bucket is false, existing_bucket_regional_domain_name must be provided."
+  }
+}
+
 variable "tags" {
   type    = map(string)
   default = {}

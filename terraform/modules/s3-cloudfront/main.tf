@@ -12,15 +12,21 @@ locals {
     Project   = var.project_name
     ManagedBy = "Terraform"
   })
+
+  frontend_bucket_id                   = var.create_bucket ? aws_s3_bucket.frontend[0].id : var.existing_bucket_id
+  frontend_bucket_arn                  = var.create_bucket ? aws_s3_bucket.frontend[0].arn : var.existing_bucket_arn
+  frontend_bucket_regional_domain_name = var.create_bucket ? aws_s3_bucket.frontend[0].bucket_regional_domain_name : var.existing_bucket_regional_domain_name
 }
 
 resource "aws_s3_bucket" "frontend" {
+  count  = var.create_bucket ? 1 : 0
   bucket = var.frontend_bucket_name
   tags   = local.common_tags
 }
 
 resource "aws_s3_bucket_versioning" "frontend" {
-  bucket = aws_s3_bucket.frontend.id
+  count  = var.create_bucket ? 1 : 0
+  bucket = aws_s3_bucket.frontend[0].id
 
   versioning_configuration {
     status = "Enabled"
@@ -28,7 +34,8 @@ resource "aws_s3_bucket_versioning" "frontend" {
 }
 
 resource "aws_s3_bucket_public_access_block" "frontend" {
-  bucket                  = aws_s3_bucket.frontend.id
+  count                   = var.create_bucket ? 1 : 0
+  bucket                  = aws_s3_bucket.frontend[0].id
   block_public_acls       = true
   block_public_policy     = true
   ignore_public_acls      = true
@@ -36,12 +43,14 @@ resource "aws_s3_bucket_public_access_block" "frontend" {
 }
 
 resource "aws_s3_bucket" "logs" {
+  count  = var.create_logs_bucket ? 1 : 0
   bucket = var.logs_bucket_name
   tags   = local.common_tags
 }
 
 resource "aws_s3_bucket_versioning" "logs" {
-  bucket = aws_s3_bucket.logs.id
+  count  = var.create_logs_bucket ? 1 : 0
+  bucket = aws_s3_bucket.logs[0].id
 
   versioning_configuration {
     status = "Enabled"
@@ -49,7 +58,8 @@ resource "aws_s3_bucket_versioning" "logs" {
 }
 
 resource "aws_s3_bucket_public_access_block" "logs" {
-  bucket                  = aws_s3_bucket.logs.id
+  count                   = var.create_logs_bucket ? 1 : 0
+  bucket                  = aws_s3_bucket.logs[0].id
   block_public_acls       = true
   block_public_policy     = true
   ignore_public_acls      = true
@@ -114,7 +124,7 @@ resource "aws_iam_policy" "replication" {
           "s3:GetReplicationConfiguration",
           "s3:ListBucket"
         ]
-        Resource = [aws_s3_bucket.frontend.arn]
+        Resource = [local.frontend_bucket_arn]
       },
       {
         Effect = "Allow"
@@ -123,7 +133,7 @@ resource "aws_iam_policy" "replication" {
           "s3:GetObjectVersionAcl",
           "s3:GetObjectVersionTagging"
         ]
-        Resource = ["${aws_s3_bucket.frontend.arn}/*"]
+        Resource = ["${local.frontend_bucket_arn}/*"]
       },
       {
         Effect = "Allow"
@@ -147,7 +157,7 @@ resource "aws_iam_role_policy_attachment" "replication" {
 
 resource "aws_s3_bucket_replication_configuration" "frontend" {
   count  = var.enable_replication ? 1 : 0
-  bucket = aws_s3_bucket.frontend.id
+  bucket = local.frontend_bucket_id
   role   = aws_iam_role.replication[0].arn
 
   rule {
@@ -173,7 +183,7 @@ resource "aws_cloudfront_origin_access_identity" "this" {
 data "aws_iam_policy_document" "frontend_bucket" {
   statement {
     actions   = ["s3:GetObject"]
-    resources = ["${aws_s3_bucket.frontend.arn}/*"]
+    resources = ["${local.frontend_bucket_arn}/*"]
 
     principals {
       type        = "AWS"
@@ -183,7 +193,7 @@ data "aws_iam_policy_document" "frontend_bucket" {
 }
 
 resource "aws_s3_bucket_policy" "frontend" {
-  bucket = aws_s3_bucket.frontend.id
+  bucket = local.frontend_bucket_id
   policy = data.aws_iam_policy_document.frontend_bucket.json
 }
 
@@ -195,7 +205,7 @@ resource "aws_cloudfront_distribution" "frontend" {
   aliases             = var.aliases
 
   origin {
-    domain_name = aws_s3_bucket.frontend.bucket_regional_domain_name
+    domain_name = local.frontend_bucket_regional_domain_name
     origin_id   = "frontend-s3-origin"
 
     s3_origin_config {
