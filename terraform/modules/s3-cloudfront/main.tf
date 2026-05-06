@@ -257,5 +257,16 @@ resource "aws_cloudfront_distribution" "frontend" {
     error_caching_min_ttl = 0
   }
 
+  lifecycle {
+    precondition {
+      condition = var.create_bucket || (
+        try(trim(var.existing_bucket_id, " ") != "", false) &&
+        try(trim(var.existing_bucket_arn, " ") != "", false) &&
+        try(trim(var.existing_bucket_regional_domain_name, " ") != "", false)
+      )
+      error_message = "When create_bucket is false, existing_bucket_id, existing_bucket_arn, and existing_bucket_regional_domain_name must all be provided."
+    }
+  }
+
   tags = local.common_tags
 }
