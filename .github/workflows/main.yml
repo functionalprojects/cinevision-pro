@@ -38,10 +38,10 @@ jobs:
         with:
           filters: |
             terraform: ['terraform/**']
-            k8s: ['cinevision-microservices/k8s/**']
-            services: ['cinevision-microservices/services/api-gateway/**', 'cinevision-microservices/services/eureka-server/**', 'cinevision-microservices/services/movieService/**', 'cinevision-microservices/services/userService/**', 'cinevision-microservices/services/emailService/**', 'cinevision-microservices/services/frontend/**']
-            docs: ['cinevision-microservices/docs/**', 'README.md']
-            scripts: ['cinevision-microservices/scripts/**']
+            k8s: ['cinevision-pro/k8s/**']
+            services: ['cinevision-pro/services/api-gateway/**', 'cinevision-pro/services/eureka-server/**', 'cinevision-pro/services/movieService/**', 'cinevision-pro/services/userService/**', 'cinevision-pro/services/emailService/**', 'cinevision-pro/services/frontend/**']
+            docs: ['cinevision-pro/docs/**', 'README.md']
+            scripts: ['cinevision-pro/scripts/**']
 
       - id: set-env
         run: |
@@ -147,14 +147,14 @@ jobs:
       - name: Validate manifests
         run: |
           set -e
-          find cinevision-microservices/k8s -name '*.yaml' -exec kubeconform -strict {} \;
+          find cinevision-pro/k8s -name '*.yaml' -exec kubeconform -strict {} \;
 
       - name: Kustomize Build Test
         run: |
           set -e
           for env in dev staging prod dr; do
-            if [ -d "cinevision-microservices/k8s/overlays/$env" ]; then
-              kustomize build cinevision-microservices/k8s/overlays/$env > /dev/null
+            if [ -d "cinevision-pro/k8s/overlays/$env" ]; then
+              kustomize build cinevision-pro/k8s/overlays/$env > /dev/null
             fi
           done
 
@@ -184,17 +184,17 @@ jobs:
           echo "🔍 Scanning for available services..."
           
           for service in "${ALL_SERVICES[@]}"; do
-            if [ -d "cinevision-microservices/services/$service" ]; then
+            if [ -d "cinevision-pro/services/$service" ]; then
               # Additional check: at least have a build file
               if [[ "$service" == "frontend" ]]; then
-                if [ -f "cinevision-microservices/services/$service/package.json" ]; then
+                if [ -f "cinevision-pro/services/$service/package.json" ]; then
                   AVAILABLE_SERVICES+=("$service")
                   echo "✅ Found service: $service"
                 else
                   echo "⚠️ Directory exists but no package.json: $service"
                 fi
               else
-                if [ -f "cinevision-microservices/services/$service/pom.xml" ]; then
+                if [ -f "cinevision-pro/services/$service/pom.xml" ]; then
                   AVAILABLE_SERVICES+=("$service")
                   echo "✅ Found service: $service"
                 else
@@ -249,12 +249,12 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-          cache-dependency-path: cinevision-microservices/services/frontend/package-lock.json
+          cache-dependency-path: cinevision-pro/services/frontend/package-lock.json
           
       - name: Validate Service Structure
         id: validate-structure
         run: |
-          SERVICE_PATH="cinevision-microservices/services/${{ matrix.service }}"
+          SERVICE_PATH="cinevision-pro/services/${{ matrix.service }}"
           
           if [ ! -d "$SERVICE_PATH" ]; then
             echo "❌ Service directory not found: $SERVICE_PATH"
@@ -278,7 +278,7 @@ jobs:
       - name: Build & Test Service
         run: |
           set -e
-          cd cinevision-microservices/services/${{ matrix.service }}
+          cd cinevision-pro/services/${{ matrix.service }}
           
           echo "🔨 Building and testing ${{ matrix.service }}..."
           
@@ -326,7 +326,7 @@ jobs:
       - name: Run Additional Checks for Java Service
         if: matrix.service != 'frontend' && success()
         run: |
-          cd cinevision-microservices/services/${{ matrix.service }}
+          cd cinevision-pro/services/${{ matrix.service }}
           
           echo "🔍 Running additional Java checks..."
           
@@ -344,7 +344,7 @@ jobs:
       - name: Run Additional Checks for Frontend
         if: matrix.service == 'frontend' && success()
         run: |
-          cd cinevision-microservices/services/frontend
+          cd cinevision-pro/services/frontend
           
           echo "🔍 Running additional frontend checks..."
           
@@ -365,10 +365,10 @@ jobs:
         with:
           name: reports-${{ matrix.service }}-${{ github.run_id }}
           path: |
-            cinevision-microservices/services/${{ matrix.service }}/target/surefire-reports/
-            cinevision-microservices/services/${{ matrix.service }}/target/site/
-            cinevision-microservices/services/${{ matrix.service }}/coverage/
-            cinevision-microservices/services/${{ matrix.service }}/test-reports/
+            cinevision-pro/services/${{ matrix.service }}/target/surefire-reports/
+            cinevision-pro/services/${{ matrix.service }}/target/site/
+            cinevision-pro/services/${{ matrix.service }}/coverage/
+            cinevision-pro/services/${{ matrix.service }}/test-reports/
           retention-days: 7
           
       - name: Upload Build Artifacts (Optional)
@@ -377,9 +377,9 @@ jobs:
         with:
           name: build-${{ matrix.service }}-${{ github.run_id }}
           path: |
-            cinevision-microservices/services/${{ matrix.service }}/target/*.jar
-            cinevision-microservices/services/${{ matrix.service }}/dist/
-            cinevision-microservices/services/${{ matrix.service }}/build/
+            cinevision-pro/services/${{ matrix.service }}/target/*.jar
+            cinevision-pro/services/${{ matrix.service }}/dist/
+            cinevision-pro/services/${{ matrix.service }}/build/
           retention-days: 3
           
       - name: Service Validation Failed
@@ -411,24 +411,24 @@ jobs:
 
       - name: Shell lint
         run: |
-          if find cinevision-microservices/scripts -name '*.sh' 2>/dev/null | grep -q .; then
-            find cinevision-microservices/scripts -name '*.sh' -exec shellcheck {} \;
+          if find cinevision-pro/scripts -name '*.sh' 2>/dev/null | grep -q .; then
+            find cinevision-pro/scripts -name '*.sh' -exec shellcheck {} \;
           else
             echo "No shell scripts found"
           fi
 
       - name: Python syntax
         run: |
-          if find cinevision-microservices/scripts/python -name '*.py' 2>/dev/null | grep -q .; then
-            find cinevision-microservices/scripts/python -name '*.py' -exec python3 -m py_compile {} \;
+          if find cinevision-pro/scripts/python -name '*.py' 2>/dev/null | grep -q .; then
+            find cinevision-pro/scripts/python -name '*.py' -exec python3 -m py_compile {} \;
           else
             echo "No Python scripts found"
           fi
 
       - name: Ansible validation
         run: |
-          if ls cinevision-microservices/scripts/ansible/*.yml 1> /dev/null 2>&1; then
-            ansible-playbook --syntax-check cinevision-microservices/scripts/ansible/*.yml
+          if ls cinevision-pro/scripts/ansible/*.yml 1> /dev/null 2>&1; then
+            ansible-playbook --syntax-check cinevision-pro/scripts/ansible/*.yml
           else
             echo "No Ansible playbooks found"
           fi
