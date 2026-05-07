@@ -6,7 +6,7 @@
 
     <parent>
         <groupId>com.kaankaplan</groupId>
-        <artifactId>cinevision-microservices</artifactId>
+        <artifactId>cinevision-pro</artifactId>
         <version>1.0.0</version>
     </parent>
 
