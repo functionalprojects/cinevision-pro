@@ -39,7 +39,7 @@ jobs:
           filters: |
             terraform: ['terraform/**']
             k8s: ['cinevision-microservices/k8s/**']
-            services: ['cinevision-microservices/api-gateway/**', 'cinevision-microservices/eureka-server/**', 'cinevision-microservices/movieService/**', 'cinevision-microservices/userService/**', 'cinevision-microservices/emailService/**', 'cinevision-microservices/frontend/**']
+            services: ['cinevision-microservices/services/api-gateway/**', 'cinevision-microservices/services/eureka-server/**', 'cinevision-microservices/services/movieService/**', 'cinevision-microservices/services/userService/**', 'cinevision-microservices/services/emailService/**', 'cinevision-microservices/services/frontend/**']
             docs: ['cinevision-microservices/docs/**', 'README.md']
             scripts: ['cinevision-microservices/scripts/**']
 
@@ -184,17 +184,17 @@ jobs:
           echo "🔍 Scanning for available services..."
           
           for service in "${ALL_SERVICES[@]}"; do
-            if [ -d "cinevision-microservices/$service" ]; then
+            if [ -d "cinevision-microservices/services/$service" ]; then
               # Additional check: at least have a build file
               if [[ "$service" == "frontend" ]]; then
-                if [ -f "cinevision-microservices/$service/package.json" ]; then
+                if [ -f "cinevision-microservices/services/$service/package.json" ]; then
                   AVAILABLE_SERVICES+=("$service")
                   echo "✅ Found service: $service"
                 else
                   echo "⚠️ Directory exists but no package.json: $service"
                 fi
               else
-                if [ -f "cinevision-microservices/$service/pom.xml" ]; then
+                if [ -f "cinevision-microservices/services/$service/pom.xml" ]; then
                   AVAILABLE_SERVICES+=("$service")
                   echo "✅ Found service: $service"
                 else
@@ -249,12 +249,12 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-          cache-dependency-path: cinevision-microservices/frontend/package-lock.json
+          cache-dependency-path: cinevision-microservices/services/frontend/package-lock.json
           
       - name: Validate Service Structure
         id: validate-structure
         run: |
-          SERVICE_PATH="cinevision-microservices/${{ matrix.service }}"
+          SERVICE_PATH="cinevision-microservices/services/${{ matrix.service }}"
           
           if [ ! -d "$SERVICE_PATH" ]; then
             echo "❌ Service directory not found: $SERVICE_PATH"
@@ -278,7 +278,7 @@ jobs:
       - name: Build & Test Service
         run: |
           set -e
-          cd cinevision-microservices/${{ matrix.service }}
+          cd cinevision-microservices/services/${{ matrix.service }}
           
           echo "🔨 Building and testing ${{ matrix.service }}..."
           
@@ -326,7 +326,7 @@ jobs:
       - name: Run Additional Checks for Java Service
         if: matrix.service != 'frontend' && success()
         run: |
-          cd cinevision-microservices/${{ matrix.service }}
+          cd cinevision-microservices/services/${{ matrix.service }}
           
           echo "🔍 Running additional Java checks..."
           
@@ -344,7 +344,7 @@ jobs:
       - name: Run Additional Checks for Frontend
         if: matrix.service == 'frontend' && success()
         run: |
-          cd cinevision-microservices/frontend
+          cd cinevision-microservices/services/frontend
           
           echo "🔍 Running additional frontend checks..."
           
@@ -365,10 +365,10 @@ jobs:
         with:
           name: reports-${{ matrix.service }}-${{ github.run_id }}
           path: |
-            cinevision-microservices/${{ matrix.service }}/target/surefire-reports/
-            cinevision-microservices/${{ matrix.service }}/target/site/
-            cinevision-microservices/${{ matrix.service }}/coverage/
-            cinevision-microservices/${{ matrix.service }}/test-reports/
+            cinevision-microservices/services/${{ matrix.service }}/target/surefire-reports/
+            cinevision-microservices/services/${{ matrix.service }}/target/site/
+            cinevision-microservices/services/${{ matrix.service }}/coverage/
+            cinevision-microservices/services/${{ matrix.service }}/test-reports/
           retention-days: 7
           
       - name: Upload Build Artifacts (Optional)
@@ -377,9 +377,9 @@ jobs:
         with:
           name: build-${{ matrix.service }}-${{ github.run_id }}
           path: |
-            cinevision-microservices/${{ matrix.service }}/target/*.jar
-            cinevision-microservices/${{ matrix.service }}/dist/
-            cinevision-microservices/${{ matrix.service }}/build/
+            cinevision-microservices/services/${{ matrix.service }}/target/*.jar
+            cinevision-microservices/services/${{ matrix.service }}/dist/
+            cinevision-microservices/services/${{ matrix.service }}/build/
           retention-days: 3
           
       - name: Service Validation Failed
