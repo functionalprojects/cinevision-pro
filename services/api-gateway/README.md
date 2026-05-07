@@ -1,5 +1,5 @@
 # Api Gateway
-Api gateway manage coming requests from client.  It forwards the request to 
+Api gateway manage coming requests from client.    It forwards the request to 
 the relevant service. In this service, Spring Cloud Gateway was used.
 
 ## Technologies
