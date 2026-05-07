@@ -159,20 +159,82 @@ jobs:
           done
 
 # --------------------------------
-# 4. Services Validation
+# 4. Services Validation (Dynamic - Only Existing Services)
 # --------------------------------
-  services-validation:
+  services-discovery:
     needs: detect-changes
     if: needs.detect-changes.outputs.services == 'true'
     runs-on: ubuntu-latest
-
-    strategy:
-      matrix:
-        service: [api-gateway, eureka-server, movieService, userService, emailService, frontend]
-
+    outputs:
+      services_matrix: ${{ steps.discover-services.outputs.matrix }}
+      has_services: ${{ steps.discover-services.outputs.has_services }}
+    
     steps:
       - uses: actions/checkout@v4
+      
+      - name: Discover Available Services
+        id: discover-services
+        run: |
+          # Define all potential services
+          ALL_SERVICES=("api-gateway" "eureka-server" "movieService" "userService" "emailService" "frontend")
+          
+          # Check which services actually exist
+          AVAILABLE_SERVICES=()
+          
+          echo "🔍 Scanning for available services..."
+          
+          for service in "${ALL_SERVICES[@]}"; do
+            if [ -d "cinevision-microservices/$service" ]; then
+              # Additional check: at least have a build file
+              if [[ "$service" == "frontend" ]]; then
+                if [ -f "cinevision-microservices/$service/package.json" ]; then
+                  AVAILABLE_SERVICES+=("$service")
+                  echo "✅ Found service: $service"
+                else
+                  echo "⚠️ Directory exists but no package.json: $service"
+                fi
+              else
+                if [ -f "cinevision-microservices/$service/pom.xml" ]; then
+                  AVAILABLE_SERVICES+=("$service")
+                  echo "✅ Found service: $service"
+                else
+                  echo "⚠️ Directory exists but no pom.xml: $service"
+                fi
+              fi
+            else
+              echo "❌ Service not yet created: $service"
+            fi
+          done
+          
+          # Convert to JSON for matrix
+          if [ ${#AVAILABLE_SERVICES[@]} -eq 0 ]; then
+            echo "No services found to validate"
+            echo "matrix=[]" >> $GITHUB_OUTPUT
+            echo "has_services=false" >> $GITHUB_OUTPUT
+          else
+            matrix_json=$(printf '%s\n' "${AVAILABLE_SERVICES[@]}" | jq -R . | jq -cs .)
+            echo "matrix=$matrix_json" >> $GITHUB_OUTPUT
+            echo "has_services=true" >> $GITHUB_OUTPUT
+            echo "Found ${#AVAILABLE_SERVICES[@]} services to validate"
+          fi
+          
+      - name: Display Validation Plan
+        run: |
+          echo "📋 Services to validate: ${{ steps.discover-services.outputs.matrix }}"
 
+  services-validation:
+    needs: [detect-changes, services-discovery]
+    if: needs.detect-changes.outputs.services == 'true' && needs.services-discovery.outputs.has_services == 'true'
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        service: ${{ fromJson(needs.services-discovery.outputs.services_matrix) }}
+      fail-fast: false  # Don't cancel other services if one fails
+    
+    steps:
+      - uses: actions/checkout@v4
+      
       - name: Setup Java
         if: matrix.service != 'frontend'
         uses: actions/setup-java@v4
@@ -180,7 +242,7 @@ jobs:
           java-version: ${{ env.JAVA_VERSION }}
           distribution: 'temurin'
           cache: 'maven'
-
+          
       - name: Setup Node
         if: matrix.service == 'frontend'
         uses: actions/setup-node@v4
@@ -188,20 +250,115 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
           cache-dependency-path: cinevision-microservices/frontend/package-lock.json
-
-      - name: Build & Test
+          
+      - name: Validate Service Structure
+        id: validate-structure
+        run: |
+          SERVICE_PATH="cinevision-microservices/${{ matrix.service }}"
+          
+          if [ ! -d "$SERVICE_PATH" ]; then
+            echo "❌ Service directory not found: $SERVICE_PATH"
+            exit 1
+          fi
+          
+          if [[ "${{ matrix.service }}" == "frontend" ]]; then
+            if [ ! -f "$SERVICE_PATH/package.json" ]; then
+              echo "❌ package.json not found for frontend service"
+              exit 1
+            fi
+          else
+            if [ ! -f "$SERVICE_PATH/pom.xml" ]; then
+              echo "❌ pom.xml not found for ${{ matrix.service }}"
+              exit 1
+            fi
+          fi
+          
+          echo "✅ Service structure validated"
+          
+      - name: Build & Test Service
         run: |
           set -e
           cd cinevision-microservices/${{ matrix.service }}
-
+          
+          echo "🔨 Building and testing ${{ matrix.service }}..."
+          
           if [ "${{ matrix.service }}" == "frontend" ]; then
+            # Frontend validation
+            echo "📦 Installing Node dependencies..."
             npm ci
-            npm run test --if-present
-            npm run build
+            
+            if grep -q '"test"' package.json; then
+              echo "🧪 Running frontend tests..."
+              npm run test --if-present
+            else
+              echo "ℹ️ No tests defined in package.json"
+            fi
+            
+            if grep -q '"build"' package.json; then
+              echo "🏗️ Building frontend..."
+              npm run build
+            else
+              echo "ℹ️ No build script defined"
+            fi
+            
           else
-            mvn -B clean test
+            # Java service validation
+            echo "📦 Building with Maven..."
+            
+            # Check if tests exist
+            if [ -d "src/test" ]; then
+              echo "🧪 Running tests..."
+              mvn -B clean test
+            else
+              echo "ℹ️ No tests found, running compile only..."
+              mvn -B clean compile
+            fi
+            
+            # Verify JAR is created for Spring Boot services
+            if grep -q "spring-boot-maven-plugin" pom.xml; then
+              echo "📦 Spring Boot service detected, packaging JAR..."
+              mvn -B package -DskipTests
+            fi
           fi
-
+          
+          echo "✅ Service ${{ matrix.service }} validated successfully!"
+          
+      - name: Run Additional Checks for Java Service
+        if: matrix.service != 'frontend' && success()
+        run: |
+          cd cinevision-microservices/${{ matrix.service }}
+          
+          echo "🔍 Running additional Java checks..."
+          
+          # Check for System.out.println in production code (excluding test directories)
+          if grep -r --include="*.java" "System\.out\.println" src/main/ 2>/dev/null; then
+            echo "⚠️ Warning: System.out.println found in main code. Consider using logger."
+          fi
+          
+          # Check for TODO comments
+          if grep -r --include="*.java" "TODO" src/ 2>/dev/null | grep -v "// TODO"; then
+            echo "📝 TODO comments found:"
+            grep -r --include="*.java" "TODO" src/ | head -5
+          fi
+          
+      - name: Run Additional Checks for Frontend
+        if: matrix.service == 'frontend' && success()
+        run: |
+          cd cinevision-microservices/frontend
+          
+          echo "🔍 Running additional frontend checks..."
+          
+          # Check for console.log statements (warn but don't fail)
+          if grep -r --include="*.js" --include="*.jsx" --include="*.ts" --include="*.tsx" "console\.log" src/ 2>/dev/null; then
+            echo "⚠️ Warning: console.log statements found. Consider removing in production."
+          fi
+          
+          # Run linting if available
+          if grep -q '"lint"' package.json; then
+            echo "🧹 Running linter..."
+            npm run lint --if-present
+          fi
+          
       - name: Upload Test Reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -211,7 +368,30 @@ jobs:
             cinevision-microservices/${{ matrix.service }}/target/surefire-reports/
             cinevision-microservices/${{ matrix.service }}/target/site/
             cinevision-microservices/${{ matrix.service }}/coverage/
+            cinevision-microservices/${{ matrix.service }}/test-reports/
           retention-days: 7
+          
+      - name: Upload Build Artifacts (Optional)
+        if: success() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.service }}-${{ github.run_id }}
+          path: |
+            cinevision-microservices/${{ matrix.service }}/target/*.jar
+            cinevision-microservices/${{ matrix.service }}/dist/
+            cinevision-microservices/${{ matrix.service }}/build/
+          retention-days: 3
+          
+      - name: Service Validation Failed
+        if: failure()
+        run: |
+          echo "❌ Service ${{ matrix.service }} validation failed!"
+          echo "📝 Check the logs above for specific errors"
+          echo "💡 Common issues:"
+          echo "  - Missing dependencies in pom.xml/package.json"
+          echo "  - Compilation errors"
+          echo "  - Test failures"
+          echo "  - Service directory structure incorrect"
 
 # --------------------------------
 # 5. Scripts Validation
@@ -299,7 +479,7 @@ jobs:
           gitleaks detect --source . --redact --verbose --exit-code 1
 
 # --------------------------------
-# 6. Quality Gate
+# 8. Quality Gate
 # --------------------------------
   quality-gate:
     needs: [terraform-validation, kubernetes-validation, services-validation, scripts-validation, docs-validation, secrets-scan]
@@ -317,4 +497,13 @@ jobs:
             echo "❌ Validation failed"
             exit 1
           fi
+          
+          # Also check if services-validation was skipped but services should have been validated
+          if [[ "${{ needs.detect-changes.outputs.services }}" == "true" ]] && \
+             [[ "${{ needs.services-validation.result }}" == "skipped" ]] && \
+             [[ "${{ needs.services-discovery.outputs.has_services }}" == "false" ]]; then
+            echo "⚠️ Warning: Services changed but no valid service directories found"
+            echo "This might indicate misconfigured service paths"
+          fi
+          
           echo "🎉 All validations passed!"
