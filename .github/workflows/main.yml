@@ -23,19 +23,26 @@ env:
   AWS_REGION: "us-east-1"
 
 # =========================================================
-# 1. CHANGE DETECTION
+# 1. ENHANCED CHANGE DETECTION WITH SERVICE DISCOVERY
 # =========================================================
 jobs:
   detect-changes:
     runs-on: ubuntu-latest
-
     outputs:
+      # Directories that changed
       terraform: ${{ steps.filter.outputs.terraform }}
       k8s: ${{ steps.filter.outputs.k8s }}
       scripts: ${{ steps.filter.outputs.scripts }}
       docs: ${{ steps.filter.outputs.docs }}
       services: ${{ steps.filter.outputs.services }}
-      services_matrix: ${{ steps.services.outputs.matrix }}
+      
+      # Service discovery and matrix
+      available_services: ${{ steps.discover-services.outputs.available_services }}
+      changed_services: ${{ steps.filter.outputs.changed_services }}
+      changed_services_matrix: ${{ steps.services.outputs.matrix }}
+      
+      # Change summary for debugging
+      change_summary: ${{ steps.summary.outputs.summary }}
 
     steps:
       - name: Checkout
@@ -44,17 +51,81 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: Fetch base branch safely
+      - name: Fetch base branch
         run: |
-          # Try multiple strategies to get the base branch
-          git fetch origin ${{ github.base_ref }}:${{ github.base_ref }} --depth=1 2>/dev/null || \
-          git fetch origin ${{ github.base_ref }} --depth=1 2>/dev/null || \
+          git fetch origin ${{ github.base_ref }}:${{ github.base_ref }} --depth=1 || \
+          git fetch origin ${{ github.base_ref }} --depth=1 || \
           git fetch origin --depth=1
+
+      # =====================================================
+      # SERVICE DISCOVERY - Dynamically find all services
+      # =====================================================
+      - name: Discover available services
+        id: discover-services
+        run: |
+          # Find all directories under services/ that contain either package.json (frontend) or pom.xml (backend)
+          SERVICES=()
           
-          # Verify branch is available
-          if ! git show-ref --verify --quiet refs/remotes/origin/${{ github.base_ref }}; then
-            echo "⚠️ Warning: Could not fetch base branch, will use limited comparison"
+          for dir in services/*/; do
+            if [ -d "$dir" ]; then
+              service_name=$(basename "$dir")
+              
+              # Validate it's a proper service directory
+              if [ -f "${dir}package.json" ] || [ -f "${dir}pom.xml" ]; then
+                SERVICES+=("\"$service_name\"")
+                echo "✅ Discovered service: $service_name"
+              else
+                echo "⚠️ Skipping $service_name - no package.json or pom.xml found"
+              fi
+            fi
+          done
+          
+          # Create JSON array
+          if [ ${#SERVICES[@]} -eq 0 ]; then
+            AVAILABLE_SERVICES="[]"
+            echo "⚠️ No services discovered"
+          else
+            AVAILABLE_SERVICES="[$(IFS=,; echo "${SERVICES[*]}")]"
+            echo "✅ Discovered ${#SERVICES[@]} services"
           fi
+          
+          echo "available_services=$AVAILABLE_SERVICES" >> $GITHUB_OUTPUT
+          
+          # Also create a space-separated list for filtering
+          SERVICES_SPACE=$(echo "$AVAILABLE_SERVICES" | jq -r '.[]' | tr '\n' ' ')
+          echo "available_services_space=$SERVICES_SPACE" >> $GITHUB_OUTPUT
+
+      # =====================================================
+      # DYNAMIC PATH FILTERING - Auto-generate service filters
+      # =====================================================
+      - name: Generate dynamic service filters
+        id: generate-filters
+        run: |
+          # Start with static filters
+          cat > filters.yaml << 'EOF'
+            terraform:
+              - 'terraform/**'
+            k8s:
+              - 'k8s/**'
+            scripts:
+              - 'scripts/**'
+            docs:
+              - '**/*.md'
+              - 'docs/**'
+              - 'README.md'
+            services:
+              - 'services/**'
+            changed_services:
+              - 'services/**'
+          EOF
+          
+          # Add dynamic service filters based on discovered services
+          echo "${{ steps.discover-services.outputs.available_services }}" | jq -r '.[]' | while read service; do
+            echo "            $service:" >> filters.yaml
+            echo "              - 'services/$service/**'" >> filters.yaml
+          done
+          
+          cat filters.yaml
 
       - name: Detect changed paths
         uses: dorny/paths-filter@v3
@@ -63,68 +134,102 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           base: ${{ github.base_ref }}
           ref: ${{ github.event.pull_request.head.sha }}
-
           filters: |
             terraform:
               - 'terraform/**'
-
             k8s:
               - 'k8s/**'
-
             scripts:
               - 'scripts/**'
-
             docs:
               - '**/*.md'
               - 'docs/**'
               - 'README.md'
-
             services:
               - 'services/**'
-
             api-gateway:
               - 'services/api-gateway/**'
-
             eureka-server:
               - 'services/eureka-server/**'
-
             movieService:
               - 'services/movieService/**'
-
             userService:
               - 'services/userService/**'
-
             emailService:
               - 'services/emailService/**'
-
             frontend:
               - 'services/frontend/**'
 
+      # =====================================================
+      # BUILD CHANGED SERVICES MATRIX (Only services that changed)
+      # =====================================================
       - name: Build changed services matrix
         id: services
         run: |
-          SERVICES=()
-
-          [[ "${{ steps.filter.outputs.api-gateway }}" == "true" ]] && SERVICES+=("\"api-gateway\"")
-          [[ "${{ steps.filter.outputs.eureka-server }}" == "true" ]] && SERVICES+=("\"eureka-server\"")
-          [[ "${{ steps.filter.outputs.movieService }}" == "true" ]] && SERVICES+=("\"movieService\"")
-          [[ "${{ steps.filter.outputs.userService }}" == "true" ]] && SERVICES+=("\"userService\"")
-          [[ "${{ steps.filter.outputs.emailService }}" == "true" ]] && SERVICES+=("\"emailService\"")
-          [[ "${{ steps.filter.outputs.frontend }}" == "true" ]] && SERVICES+=("\"frontend\"")
-
-          if [ ${#SERVICES[@]} -eq 0 ]; then
+          CHANGED_SERVICES=()
+          DISCOVERED_SERVICES='${{ steps.discover-services.outputs.available_services }}'
+          
+          # Check each discovered service if it changed
+          echo "$DISCOVERED_SERVICES" | jq -r '.[]' | while read service; do
+            # Create valid output variable name (replace hyphens with underscores)
+            var_name=$(echo "$service" | tr '-' '_')
+            
+            # Check if this specific service changed using the paths-filter output
+            if [[ "${{ steps.filter.outputs[var_name] }}" == "true" ]]; then
+              CHANGED_SERVICES+=("\"$service\"")
+              echo "✅ Service changed: $service"
+            fi
+          done
+          
+          # Also check the legacy service names from original workflow (backward compatibility)
+          [[ "${{ steps.filter.outputs.api-gateway }}" == "true" ]] && [[ ! " ${CHANGED_SERVICES[@]} " =~ "api-gateway" ]] && CHANGED_SERVICES+=("\"api-gateway\"")
+          [[ "${{ steps.filter.outputs.eureka-server }}" == "true" ]] && [[ ! " ${CHANGED_SERVICES[@]} " =~ "eureka-server" ]] && CHANGED_SERVICES+=("\"eureka-server\"")
+          [[ "${{ steps.filter.outputs.movieService }}" == "true" ]] && [[ ! " ${CHANGED_SERVICES[@]} " =~ "movieService" ]] && CHANGED_SERVICES+=("\"movieService\"")
+          [[ "${{ steps.filter.outputs.userService }}" == "true" ]] && [[ ! " ${CHANGED_SERVICES[@]} " =~ "userService" ]] && CHANGED_SERVICES+=("\"userService\"")
+          [[ "${{ steps.filter.outputs.emailService }}" == "true" ]] && [[ ! " ${CHANGED_SERVICES[@]} " =~ "emailService" ]] && CHANGED_SERVICES+=("\"emailService\"")
+          [[ "${{ steps.filter.outputs.frontend }}" == "true" ]] && [[ ! " ${CHANGED_SERVICES[@]} " =~ "frontend" ]] && CHANGED_SERVICES+=("\"frontend\"")
+          
+          # Build matrix output
+          if [ ${#CHANGED_SERVICES[@]} -eq 0 ]; then
             echo "matrix=[]" >> $GITHUB_OUTPUT
+            echo "changed_services=" >> $GITHUB_OUTPUT
+            echo "📭 No services changed"
           else
-            echo "matrix=[$(IFS=,; echo "${SERVICES[*]}")]" >> $GITHUB_OUTPUT
+            MATRIX="[$(IFS=,; echo "${CHANGED_SERVICES[*]}")]"
+            echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+            echo "changed_services=$(IFS=,; echo "${CHANGED_SERVICES[*]}")" >> $GITHUB_OUTPUT
+            echo "📦 Changed services: ${CHANGED_SERVICES[*]}"
           fi
 
+      # =====================================================
+      # GENERATE CHANGE SUMMARY
+      # =====================================================
+      - name: Generate change summary
+        id: summary
+        run: |
+          SUMMARY=""
+          
+          [[ "${{ steps.filter.outputs.terraform }}" == "true" ]] && SUMMARY="${SUMMARY}terraform "
+          [[ "${{ steps.filter.outputs.k8s }}" == "true" ]] && SUMMARY="${SUMMARY}k8s "
+          [[ "${{ steps.filter.outputs.scripts }}" == "true" ]] && SUMMARY="${SUMMARY}scripts "
+          [[ "${{ steps.filter.outputs.docs }}" == "true" ]] && SUMMARY="${SUMMARY}docs "
+          [[ "${{ steps.filter.outputs.services }}" == "true" ]] && SUMMARY="${SUMMARY}services "
+          
+          echo "summary=$SUMMARY" >> $GITHUB_OUTPUT
+          
+          echo "========================================="
+          echo "📊 CHANGE DETECTION SUMMARY"
+          echo "========================================="
+          echo "Changed categories: ${SUMMARY:-none}"
+          echo "Changed services: ${{ steps.services.outputs.changed_services }}"
+          echo "========================================="
+
 # =========================================================
-# 2. TERRAFORM VALIDATION
+# 2. TERRAFORM VALIDATION (Only if terraform dir changed)
 # =========================================================
   terraform-validation:
     needs: detect-changes
     if: needs.detect-changes.outputs.terraform == 'true'
-
     runs-on: ubuntu-latest
 
     steps:
@@ -141,26 +246,21 @@ jobs:
 
       - name: Terraform Init + Validate
         run: |
-          # Find directories containing .tf files
           find terraform -type f -name "*.tf" -printf "%h\n" | sort -u | while read dir; do
             echo "Validating $dir"
-
             (
               cd "$dir" || exit 1
-
-              # Initialize with backend disabled for validation
               terraform init -backend=false -input=false
               terraform validate
             )
           done
 
 # =========================================================
-# 3. KUBERNETES VALIDATION
+# 3. KUBERNETES VALIDATION (Only if k8s dir changed)
 # =========================================================
   kubernetes-validation:
     needs: detect-changes
     if: needs.detect-changes.outputs.k8s == 'true'
-
     runs-on: ubuntu-latest
 
     steps:
@@ -169,12 +269,6 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: Fetch base branch safely
-        run: |
-          git fetch origin ${{ github.base_ref }}:${{ github.base_ref }} --depth=1 2>/dev/null || \
-          git fetch origin ${{ github.base_ref }} --depth=1 2>/dev/null || \
-          git fetch origin --depth=1
-
       - name: Install kubeconform
         run: |
           curl -L https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | tar xz
@@ -182,47 +276,39 @@ jobs:
 
       - name: Validate changed manifests
         run: |
-          # Try multiple git diff strategies
           CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- 'k8s/**/*.yaml' 2>/dev/null || \
                           git diff --name-only ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }} -- 'k8s/**/*.yaml' 2>/dev/null || \
                           echo "")
           
           if [ -z "$CHANGED_FILES" ]; then
-            echo "No changed YAML files found, skipping validation"
+            echo "No changed YAML files found"
             exit 0
           fi
           
-          echo "$CHANGED_FILES"
           FAILED=0
-          
           echo "$CHANGED_FILES" | while read file; do
-            if [ -f "$file" ]; then
-              if ! kubeconform -strict "$file"; then
-                FAILED=1
-              fi
+            if [ -f "$file" ] && ! kubeconform -strict "$file"; then
+              FAILED=1
             fi
           done
           
-          if [ $FAILED -eq 1 ]; then
-            exit 1
-          fi
+          [ $FAILED -eq 1 ] && exit 1 || exit 0
 
 # =========================================================
-# 4. SERVICES VALIDATION
+# 4. SERVICES VALIDATION (ONLY when a service directory changed)
 # =========================================================
   services-validation:
     needs: detect-changes
-
     if: |
       needs.detect-changes.outputs.services == 'true' &&
-      needs.detect-changes.outputs.services_matrix != '[]'
-
+      needs.detect-changes.outputs.changed_services_matrix != '[]'
+    
     runs-on: ubuntu-latest
-
+    
     strategy:
       fail-fast: false
       matrix:
-        service: ${{ fromJson(needs.detect-changes.outputs.services_matrix) }}
+        service: ${{ fromJson(needs.detect-changes.outputs.changed_services_matrix) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -239,58 +325,56 @@ jobs:
             exit 1
           fi
           
-          # Validate service configuration
-          if [[ "${{ matrix.service }}" == "frontend" ]]; then
-            if [ ! -f "$SERVICE_PATH/package.json" ]; then
-              echo "❌ package.json not found for frontend service"
-              exit 1
-            fi
+          # Detect service type
+          if [ -f "$SERVICE_PATH/package.json" ]; then
+            echo "✅ Frontend service detected"
+            echo "service_type=frontend" >> $GITHUB_ENV
+          elif [ -f "$SERVICE_PATH/pom.xml" ]; then
+            echo "✅ Java service detected"
+            echo "service_type=java" >> $GITHUB_ENV
           else
-            if [ ! -f "$SERVICE_PATH/pom.xml" ]; then
-              echo "❌ pom.xml not found for ${{ matrix.service }}"
-              exit 1
-            fi
+            echo "❌ No package.json or pom.xml found for ${{ matrix.service }}"
+            exit 1
           fi
-          
-          echo "✅ Service structure validated"
 
       # -----------------------------------------
-      # JAVA
+      # JAVA SERVICE SETUP
       # -----------------------------------------
       - name: Setup Java
-        if: matrix.service != 'frontend'
+        if: env.service_type == 'java'
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
           cache: maven
+          cache-dependency-path: services/${{ matrix.service }}/pom.xml
 
       # -----------------------------------------
-      # NODE
+      # NODE SERVICE SETUP
       # -----------------------------------------
       - name: Setup Node
-        if: matrix.service == 'frontend'
+        if: env.service_type == 'frontend'
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-          cache-dependency-path: services/frontend/package-lock.json
+          cache-dependency-path: services/${{ matrix.service }}/package-lock.json
 
       # -----------------------------------------
-      # VALIDATE
+      # BUILD & TEST (Only changed services)
       # -----------------------------------------
       - name: Build and test service
         run: |
           cd services/${{ matrix.service }}
-
-          if [[ "${{ matrix.service }}" == "frontend" ]]; then
+          
+          if [[ "${{ env.service_type }}" == "frontend" ]]; then
             echo "📦 Installing Node dependencies..."
             npm ci
             
             echo "🏗️ Building frontend..."
             npm run build --if-present
             
-            if grep -q '"test"' package.json; then
+            if grep -q '"test"' package.json 2>/dev/null; then
               echo "🧪 Running tests..."
               npm test --if-present
             else
@@ -298,7 +382,7 @@ jobs:
             fi
           else
             echo "📦 Building Java service with Maven..."
-            mvn -B clean verify
+            mvn -B clean verify -DskipTests=false
           fi
 
       - name: Upload test reports
@@ -309,15 +393,16 @@ jobs:
           path: |
             services/${{ matrix.service }}/target/surefire-reports/
             services/${{ matrix.service }}/target/failsafe-reports/
+            services/${{ matrix.service }}/test-results/
           retention-days: 7
+          if-no-files-found: ignore
 
 # =========================================================
-# 5. SCRIPTS VALIDATION
+# 5. SCRIPTS VALIDATION (ONLY if scripts dir changed)
 # =========================================================
   scripts-validation:
     needs: detect-changes
     if: needs.detect-changes.outputs.scripts == 'true'
-
     runs-on: ubuntu-latest
 
     steps:
@@ -325,85 +410,66 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
-
-      - name: Fetch base branch safely
-        run: |
-          git fetch origin ${{ github.base_ref }}:${{ github.base_ref }} --depth=1 2>/dev/null || \
-          git fetch origin ${{ github.base_ref }} --depth=1 2>/dev/null || \
-          git fetch origin --depth=1
 
       - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y shellcheck python3 ansible
+          sudo apt-get install -y shellcheck python3 python3-pip ansible
+          pip3 install --upgrade pytest pylint
 
-      # -----------------------------------------
-      # SHELL
-      # -----------------------------------------
+      - name: Get changed script files
+        id: changed-scripts
+        run: |
+          # Get all changed script files of different types
+          SHELL_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- 'scripts/**/*.sh' 'scripts/**/*.bash' 2>/dev/null || echo "")
+          PYTHON_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- 'scripts/**/*.py' 2>/dev/null || echo "")
+          ANSIBLE_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- 'scripts/ansible/**/*.yml' 'scripts/ansible/**/*.yaml' 2>/dev/null || echo "")
+          
+          echo "shell_files=$SHELL_FILES" >> $GITHUB_OUTPUT
+          echo "python_files=$PYTHON_FILES" >> $GITHUB_OUTPUT
+          echo "ansible_files=$ANSIBLE_FILES" >> $GITHUB_OUTPUT
+
       - name: Validate Shell Scripts
+        if: steps.changed-scripts.outputs.shell_files != ''
         run: |
-          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- 'scripts/**/*.sh' 'scripts/**/*.bash' 2>/dev/null || \
-                         git diff --name-only ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }} -- 'scripts/**/*.sh' 'scripts/**/*.bash' 2>/dev/null || \
-                         echo "")
-          
-          if [ -n "$CHANGED_FILES" ]; then
-            echo "$CHANGED_FILES" | while read file; do
-              if [ -f "$file" ]; then
-                echo "Checking $file"
-                shellcheck "$file"
-              fi
-            done
-          else
-            echo "No shell scripts changed"
-          fi
+          echo "${{ steps.changed-scripts.outputs.shell_files }}" | while read file; do
+            if [ -f "$file" ]; then
+              echo "🔍 ShellCheck: $file"
+              shellcheck "$file"
+            fi
+          done
 
-      # -----------------------------------------
-      # PYTHON
-      # -----------------------------------------
       - name: Validate Python Scripts
+        if: steps.changed-scripts.outputs.python_files != ''
         run: |
-          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- 'scripts/**/*.py' 2>/dev/null || \
-                         git diff --name-only ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }} -- 'scripts/**/*.py' 2>/dev/null || \
-                         echo "")
-          
-          if [ -n "$CHANGED_FILES" ]; then
-            echo "$CHANGED_FILES" | while read file; do
-              if [ -f "$file" ]; then
-                echo "Checking $file"
-                python3 -m py_compile "$file"
+          echo "${{ steps.changed-scripts.outputs.python_files }}" | while read file; do
+            if [ -f "$file" ]; then
+              echo "🔍 Python syntax check: $file"
+              python3 -m py_compile "$file"
+              
+              # Run pylint if available (optional)
+              if command -v pylint &> /dev/null; then
+                pylint --exit-zero "$file"
               fi
-            done
-          else
-            echo "No Python scripts changed"
-          fi
+            fi
+          done
 
-      # -----------------------------------------
-      # ANSIBLE
-      # -----------------------------------------
-      - name: Validate Ansible
+      - name: Validate Ansible Playbooks
+        if: steps.changed-scripts.outputs.ansible_files != ''
         run: |
-          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- 'scripts/ansible/**/*.yml' 'scripts/ansible/**/*.yaml' 2>/dev/null || \
-                         git diff --name-only ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }} -- 'scripts/ansible/**/*.yml' 'scripts/ansible/**/*.yaml' 2>/dev/null || \
-                         echo "")
-          
-          if [ -n "$CHANGED_FILES" ]; then
-            echo "$CHANGED_FILES" | while read file; do
-              if [ -f "$file" ]; then
-                echo "Checking $file"
-                ansible-playbook --syntax-check "$file"
-              fi
-            done
-          else
-            echo "No Ansible playbooks changed"
-          fi
+          echo "${{ steps.changed-scripts.outputs.ansible_files }}" | while read file; do
+            if [ -f "$file" ]; then
+              echo "🔍 Ansible syntax check: $file"
+              ansible-playbook --syntax-check "$file"
+            fi
+          done
 
 # =========================================================
-# 6. DOCS VALIDATION
+# 6. DOCS VALIDATION (ONLY if docs changed)
 # =========================================================
   docs-validation:
     needs: detect-changes
     if: needs.detect-changes.outputs.docs == 'true'
-
     runs-on: ubuntu-latest
 
     steps:
@@ -412,10 +478,13 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: Fetch base branch safely
+      - name: Get changed markdown files
+        id: changed-md
         run: |
-          git fetch origin ${{ github.base_ref }}:${{ github.base_ref }} --depth=1 2>/dev/null || \
-          git fetch origin ${{ github.base_ref }} --depth=1 2>/dev/null
+          CHANGED_MD=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- '*.md' 'docs/**/*.md' 'README.md' 2>/dev/null || \
+                       git diff --name-only ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }} -- '*.md' 'docs/**/*.md' 'README.md' 2>/dev/null || \
+                       echo "")
+          echo "files=$CHANGED_MD" >> $GITHUB_OUTPUT
 
       - name: Markdown Link Check
         uses: gaurav-nelson/github-action-markdown-link-check@v1
@@ -427,28 +496,27 @@ jobs:
           file-path: './'
 
       - name: Validate markdown formatting
+        if: steps.changed-md.outputs.files != ''
         run: |
-          CHANGED_MD=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- '*.md' 'docs/**/*.md' 'README.md' 2>/dev/null || \
-                       git diff --name-only ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }} -- '*.md' 'docs/**/*.md' 'README.md' 2>/dev/null || \
-                       echo "")
-          
-          if [ -n "$CHANGED_MD" ]; then
-            echo "$CHANGED_MD" | while read file; do
-              if [ -f "$file" ]; then
-                # Check for common issues
-                if grep -E ' \t|  $' "$file" 2>/dev/null; then
-                  echo "⚠️ Warning: Trailing whitespace or tabs found in $file"
-                fi
+          echo "${{ steps.changed-md.outputs.files }}" | while read file; do
+            if [ -f "$file" ]; then
+              # Check for trailing whitespace
+              if grep -E ' \t|  $' "$file" 2>/dev/null; then
+                echo "⚠️ Warning: Trailing whitespace or tabs found in $file"
               fi
-            done
-          fi
+              
+              # Check for broken anchor links (basic check)
+              if grep -E '\[.+\]\(#[^)]+\)' "$file" | grep -vE '\(#[a-zA-Z0-9\-]+\)' > /dev/null; then
+                echo "⚠️ Warning: Potentially broken anchor links in $file"
+              fi
+            fi
+          done
 
 # =========================================================
-# 7. SECURITY SCAN (UNCHANGED - KEPT EXACTLY AS PROVIDED)
+# 7. SECURITY SCAN (ALWAYS RUNS - CRITICAL)
 # =========================================================
   secrets-scan:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
         with:
@@ -468,11 +536,10 @@ jobs:
           gitleaks detect --source . --redact --verbose --exit-code 1
 
 # =========================================================
-# 8. QUALITY GATE
+# 8. QUALITY GATE (Enhanced with detailed reporting)
 # =========================================================
   quality-gate:
     if: always()
-
     needs:
       - detect-changes
       - terraform-validation
@@ -481,53 +548,65 @@ jobs:
       - scripts-validation
       - docs-validation
       - secrets-scan
-
+    
     runs-on: ubuntu-latest
-
+    outputs:
+      overall_status: ${{ steps.evaluate.outputs.status }}
+    
     steps:
       - name: Evaluate all validations
+        id: evaluate
         run: |
           echo "========================================="
           echo "📊 PR VALIDATION SUMMARY"
           echo "========================================="
           echo ""
+          echo "📝 Change Summary: ${{ needs.detect-changes.outputs.change_summary }}"
+          echo "🎯 Changed Services: ${{ needs.detect-changes.outputs.changed_services }}"
+          echo ""
           
-          # Track failures and skipped validations
           FAILED=0
           SKIPPED=0
+          REQUIRED_FAILED=0
           
           # Function to check job status
           check_job() {
             local job_name=$1
             local job_result=$2
-            local required=$3
+            local should_run=$3
+            local is_required=$4
             
-            if [[ "$required" == "required" ]] || [[ "$job_result" != "skipped" ]]; then
+            if [[ "$should_run" == "true" ]]; then
+              # Job should have run - check its result
               if [[ "$job_result" == "success" ]]; then
                 echo "✅ $job_name: PASSED"
               elif [[ "$job_result" == "failure" ]]; then
                 echo "❌ $job_name: FAILED"
                 FAILED=1
+                [[ "$is_required" == "true" ]] && REQUIRED_FAILED=1
               elif [[ "$job_result" == "skipped" ]]; then
-                echo "⏭️ $job_name: SKIPPED (no changes)"
-                SKIPPED=$((SKIPPED + 1))
+                echo "⚠️ $job_name: SKIPPED (but should have run)"
+                FAILED=1
+                [[ "$is_required" == "true" ]] && REQUIRED_FAILED=1
               else
                 echo "⚠️ $job_name: $job_result"
                 FAILED=1
+                [[ "$is_required" == "true" ]] && REQUIRED_FAILED=1
               fi
             else
-              echo "⏭️ $job_name: SKIPPED"
+              # Job correctly skipped
+              echo "⏭️ $job_name: SKIPPED (no changes)"
               SKIPPED=$((SKIPPED + 1))
             fi
           }
           
-          # Check each validation job
-          check_job "Terraform" "${{ needs.terraform-validation.result }}" "${{ needs.detect-changes.outputs.terraform == 'true' && 'required' || 'optional' }}"
-          check_job "Kubernetes" "${{ needs.kubernetes-validation.result }}" "${{ needs.detect-changes.outputs.k8s == 'true' && 'required' || 'optional' }}"
-          check_job "Services" "${{ needs.services-validation.result }}" "${{ needs.detect-changes.outputs.services == 'true' && 'required' || 'optional' }}"
-          check_job "Scripts" "${{ needs.scripts-validation.result }}" "${{ needs.detect-changes.outputs.scripts == 'true' && 'required' || 'optional' }}"
-          check_job "Documentation" "${{ needs.docs-validation.result }}" "${{ needs.detect-changes.outputs.docs == 'true' && 'required' || 'optional' }}"
-          check_job "Secrets Scan" "${{ needs.secrets-scan.result }}" "required"
+          # Check each validation job based on whether it should have run
+          check_job "Terraform" "${{ needs.terraform-validation.result }}" "${{ needs.detect-changes.outputs.terraform == 'true' }}" "true"
+          check_job "Kubernetes" "${{ needs.kubernetes-validation.result }}" "${{ needs.detect-changes.outputs.k8s == 'true' }}" "true"
+          check_job "Services" "${{ needs.services-validation.result }}" "${{ needs.detect-changes.outputs.services == 'true' }}" "true"
+          check_job "Scripts" "${{ needs.scripts-validation.result }}" "${{ needs.detect-changes.outputs.scripts == 'true' }}" "true"
+          check_job "Documentation" "${{ needs.docs-validation.result }}" "${{ needs.discs-validation.outputs.docs == 'true' }}" "false"
+          check_job "Secrets Scan" "${{ needs.secrets-scan.result }}" "true" "true"
           
           echo ""
           echo "========================================="
@@ -538,14 +617,16 @@ jobs:
               echo "📈 $SKIPPED validation(s) skipped (no relevant changes)"
             fi
             echo "========================================="
+            echo "status=passed" >> $GITHUB_OUTPUT
             exit 0
           else
             echo "❌ VALIDATION FAILED - Please fix the errors above"
             echo "========================================="
+            echo "status=failed" >> $GITHUB_OUTPUT
             exit 1
           fi
 
-      - name: Add PR comment on failure
+      - name: Add detailed PR comment
         if: failure()
         uses: actions/github-script@v7
         with:
@@ -553,10 +634,49 @@ jobs:
             const prNumber = context.payload.pull_request.number;
             const owner = context.repo.owner;
             const repo = context.repo.repo;
+            const changeSummary = '${{ needs.detect-changes.outputs.change_summary }}';
+            const changedServices = '${{ needs.detect-changes.outputs.changed_services }}';
+            
+            let body = `❌ **PR Validation Failed**\n\n`;
+            body += `## Change Impact Analysis\n`;
+            body += `**Changed components:** ${changeSummary || 'none detected'}\n`;
+            body += `**Changed services:** ${changedServices || 'none'}\n\n`;
+            body += `## Failed Validations\n`;
+            body += `One or more validation checks have failed. Please check the workflow logs for details.\n\n`;
+            body += `### How to Fix\n`;
+            body += `1. Review the workflow run logs above\n`;
+            body += `2. Address the specific validation errors\n`;
+            body += `3. Push fixes to this branch (workflow will re-run)\n\n`;
+            body += `**Note:** Only directories with changes are validated. If you see a validation for a component you didn't change, check your PR's change detection.\n\n`;
+            body += `[View full workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`;
             
             await github.rest.issues.createComment({
               owner,
               repo,
               issue_number: prNumber,
-              body: '❌ **PR Validation Failed**\n\nOne or more validation checks have failed. Please check the workflow logs for details and fix the issues before merging.\n\nView the full workflow run here: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+              body: body
+            });
+
+      - name: Add success comment with change summary
+        if: success() && needs.detect-changes.outputs.change_summary != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.payload.pull_request.number;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const changeSummary = '${{ needs.detect-changes.outputs.change_summary }}';
+            const changedServices = '${{ needs.detect-changes.outputs.changed_services }}';
+            
+            let body = `✅ **PR Validation Passed**\n\n`;
+            body += `## Validated Changes\n`;
+            body += `**Changed components:** ${changeSummary}\n`;
+            body += `**Changed services:** ${changedServices || 'none'}\n\n`;
+            body += `All validations completed successfully. This PR is ready for review.`;
+            
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: prNumber,
+              body: body
             });
