@@ -1,5 +1,5 @@
 package com.kaankaplan;
-// hello to
+// hello today
 
 import org.junit.jupiter.api.Test;
 
