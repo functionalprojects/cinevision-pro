@@ -53,7 +53,7 @@ resource "aws_docdb_cluster" "primary" {
   global_cluster_identifier       = var.enable_global_cluster ? aws_docdb_global_cluster.this[0].id : null
   deletion_protection             = false
   apply_immediately               = true
-  skip_final_snapshot             = false
+  skip_final_snapshot             = true
   final_snapshot_identifier       = "${var.identifier}-final-snapshot"
 
   tags = local.common_tags
