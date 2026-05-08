@@ -1,6 +1,7 @@
 FROM maven:3.9.9-eclipse-temurin-21 AS build
 
 WORKDIR /workspace
+# hello
 
 COPY pom.xml pom.xml
 COPY api-gateway/pom.xml api-gateway/pom.xml
