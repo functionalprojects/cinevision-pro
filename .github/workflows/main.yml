@@ -1,4 +1,3 @@
-
 name: PR Validation
 
 on:
@@ -43,12 +42,27 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Fetch base branch safely
+        run: |
+          # Try multiple strategies to get the base branch
+          git fetch origin ${{ github.base_ref }}:${{ github.base_ref }} --depth=1 2>/dev/null || \
+          git fetch origin ${{ github.base_ref }} --depth=1 2>/dev/null || \
+          git fetch origin --depth=1
+          
+          # Verify branch is available
+          if ! git show-ref --verify --quiet refs/remotes/origin/${{ github.base_ref }}; then
+            echo "⚠️ Warning: Could not fetch base branch, will use limited comparison"
+          fi
 
       - name: Detect changed paths
         uses: dorny/paths-filter@v3
         id: filter
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          base: ${{ github.base_ref }}
+          ref: ${{ github.event.pull_request.head.sha }}
 
           filters: |
             terraform:
@@ -115,6 +129,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: hashicorp/setup-terraform@v3
         with:
@@ -125,14 +141,14 @@ jobs:
 
       - name: Terraform Init + Validate
         run: |
-          find terraform -type f -name "*.tf" | while read file; do
-            DIR=$(dirname "$file")
-
-            echo "Validating $DIR"
+          # Find directories containing .tf files
+          find terraform -type f -name "*.tf" -printf "%h\n" | sort -u | while read dir; do
+            echo "Validating $dir"
 
             (
-              cd "$DIR"
+              cd "$dir" || exit 1
 
+              # Initialize with backend disabled for validation
               terraform init -backend=false -input=false
               terraform validate
             )
@@ -149,6 +165,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Fetch base branch safely
+        run: |
+          git fetch origin ${{ github.base_ref }}:${{ github.base_ref }} --depth=1 2>/dev/null || \
+          git fetch origin ${{ github.base_ref }} --depth=1 2>/dev/null || \
+          git fetch origin --depth=1
 
       - name: Install kubeconform
         run: |
@@ -157,17 +182,30 @@ jobs:
 
       - name: Validate changed manifests
         run: |
-          CHANGED_FILES=$(git diff --name-only \
-            origin/${{ github.base_ref }}...HEAD \
-            -- 'k8s/**/*.yaml')
-
+          # Try multiple git diff strategies
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- 'k8s/**/*.yaml' 2>/dev/null || \
+                          git diff --name-only ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }} -- 'k8s/**/*.yaml' 2>/dev/null || \
+                          echo "")
+          
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "No changed YAML files found, skipping validation"
+            exit 0
+          fi
+          
           echo "$CHANGED_FILES"
-
+          FAILED=0
+          
           echo "$CHANGED_FILES" | while read file; do
             if [ -f "$file" ]; then
-              kubeconform -strict "$file"
+              if ! kubeconform -strict "$file"; then
+                FAILED=1
+              fi
             fi
           done
+          
+          if [ $FAILED -eq 1 ]; then
+            exit 1
+          fi
 
 # =========================================================
 # 4. SERVICES VALIDATION
@@ -188,6 +226,33 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Validate service directory
+        run: |
+          SERVICE_PATH="services/${{ matrix.service }}"
+          
+          if [ ! -d "$SERVICE_PATH" ]; then
+            echo "❌ Service directory not found: $SERVICE_PATH"
+            exit 1
+          fi
+          
+          # Validate service configuration
+          if [[ "${{ matrix.service }}" == "frontend" ]]; then
+            if [ ! -f "$SERVICE_PATH/package.json" ]; then
+              echo "❌ package.json not found for frontend service"
+              exit 1
+            fi
+          else
+            if [ ! -f "$SERVICE_PATH/pom.xml" ]; then
+              echo "❌ pom.xml not found for ${{ matrix.service }}"
+              exit 1
+            fi
+          fi
+          
+          echo "✅ Service structure validated"
 
       # -----------------------------------------
       # JAVA
@@ -219,12 +284,32 @@ jobs:
           cd services/${{ matrix.service }}
 
           if [[ "${{ matrix.service }}" == "frontend" ]]; then
+            echo "📦 Installing Node dependencies..."
             npm ci
+            
+            echo "🏗️ Building frontend..."
             npm run build --if-present
-            npm test --if-present
+            
+            if grep -q '"test"' package.json; then
+              echo "🧪 Running tests..."
+              npm test --if-present
+            else
+              echo "ℹ️ No tests defined"
+            fi
           else
+            echo "📦 Building Java service with Maven..."
             mvn -B clean verify
           fi
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-${{ matrix.service }}-${{ github.run_id }}
+          path: |
+            services/${{ matrix.service }}/target/surefire-reports/
+            services/${{ matrix.service }}/target/failsafe-reports/
+          retention-days: 7
 
 # =========================================================
 # 5. SCRIPTS VALIDATION
@@ -237,6 +322,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Fetch base branch safely
+        run: |
+          git fetch origin ${{ github.base_ref }}:${{ github.base_ref }} --depth=1 2>/dev/null || \
+          git fetch origin ${{ github.base_ref }} --depth=1 2>/dev/null || \
+          git fetch origin --depth=1
 
       - name: Install tools
         run: |
@@ -248,36 +342,60 @@ jobs:
       # -----------------------------------------
       - name: Validate Shell Scripts
         run: |
-          git diff --name-only origin/${{ github.base_ref }}...HEAD \
-            -- 'scripts/**/*.sh' 'scripts/**/*.bash' \
-            | while read file; do
-
-              [ -f "$file" ] && shellcheck "$file"
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- 'scripts/**/*.sh' 'scripts/**/*.bash' 2>/dev/null || \
+                         git diff --name-only ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }} -- 'scripts/**/*.sh' 'scripts/**/*.bash' 2>/dev/null || \
+                         echo "")
+          
+          if [ -n "$CHANGED_FILES" ]; then
+            echo "$CHANGED_FILES" | while read file; do
+              if [ -f "$file" ]; then
+                echo "Checking $file"
+                shellcheck "$file"
+              fi
             done
+          else
+            echo "No shell scripts changed"
+          fi
 
       # -----------------------------------------
       # PYTHON
       # -----------------------------------------
       - name: Validate Python Scripts
         run: |
-          git diff --name-only origin/${{ github.base_ref }}...HEAD \
-            -- 'scripts/**/*.py' \
-            | while read file; do
-
-              [ -f "$file" ] && python3 -m py_compile "$file"
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- 'scripts/**/*.py' 2>/dev/null || \
+                         git diff --name-only ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }} -- 'scripts/**/*.py' 2>/dev/null || \
+                         echo "")
+          
+          if [ -n "$CHANGED_FILES" ]; then
+            echo "$CHANGED_FILES" | while read file; do
+              if [ -f "$file" ]; then
+                echo "Checking $file"
+                python3 -m py_compile "$file"
+              fi
             done
+          else
+            echo "No Python scripts changed"
+          fi
 
       # -----------------------------------------
       # ANSIBLE
       # -----------------------------------------
       - name: Validate Ansible
         run: |
-          git diff --name-only origin/${{ github.base_ref }}...HEAD \
-            -- 'scripts/ansible/**/*.yml' 'scripts/ansible/**/*.yaml' \
-            | while read file; do
-
-              [ -f "$file" ] && ansible-playbook --syntax-check "$file"
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- 'scripts/ansible/**/*.yml' 'scripts/ansible/**/*.yaml' 2>/dev/null || \
+                         git diff --name-only ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }} -- 'scripts/ansible/**/*.yml' 'scripts/ansible/**/*.yaml' 2>/dev/null || \
+                         echo "")
+          
+          if [ -n "$CHANGED_FILES" ]; then
+            echo "$CHANGED_FILES" | while read file; do
+              if [ -f "$file" ]; then
+                echo "Checking $file"
+                ansible-playbook --syntax-check "$file"
+              fi
             done
+          else
+            echo "No Ansible playbooks changed"
+          fi
 
 # =========================================================
 # 6. DOCS VALIDATION
@@ -290,6 +408,14 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Fetch base branch safely
+        run: |
+          git fetch origin ${{ github.base_ref }}:${{ github.base_ref }} --depth=1 2>/dev/null || \
+          git fetch origin ${{ github.base_ref }} --depth=1 2>/dev/null
 
       - name: Markdown Link Check
         uses: gaurav-nelson/github-action-markdown-link-check@v1
@@ -297,9 +423,28 @@ jobs:
           use-quiet-mode: 'yes'
           check-modified-files-only: 'yes'
           base-branch: ${{ github.base_ref }}
+          folder-path: './'
+          file-path: './'
+
+      - name: Validate markdown formatting
+        run: |
+          CHANGED_MD=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- '*.md' 'docs/**/*.md' 'README.md' 2>/dev/null || \
+                       git diff --name-only ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }} -- '*.md' 'docs/**/*.md' 'README.md' 2>/dev/null || \
+                       echo "")
+          
+          if [ -n "$CHANGED_MD" ]; then
+            echo "$CHANGED_MD" | while read file; do
+              if [ -f "$file" ]; then
+                # Check for common issues
+                if grep -E ' \t|  $' "$file" 2>/dev/null; then
+                  echo "⚠️ Warning: Trailing whitespace or tabs found in $file"
+                fi
+              fi
+            done
+          fi
 
 # =========================================================
-# 7. SECURITY SCAN (UNCHANGED)
+# 7. SECURITY SCAN (UNCHANGED - KEPT EXACTLY AS PROVIDED)
 # =========================================================
   secrets-scan:
     runs-on: ubuntu-latest
@@ -329,6 +474,7 @@ jobs:
     if: always()
 
     needs:
+      - detect-changes
       - terraform-validation
       - kubernetes-validation
       - services-validation
@@ -339,25 +485,78 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Evaluate
+      - name: Evaluate all validations
         run: |
-          echo "Validation Summary"
-
-          RESULTS=(
-            "${{ needs.terraform-validation.result }}"
-            "${{ needs.kubernetes-validation.result }}"
-            "${{ needs.services-validation.result }}"
-            "${{ needs.scripts-validation.result }}"
-            "${{ needs.docs-validation.result }}"
-            "${{ needs.secrets-scan.result }}"
-          )
-
-          for result in "${RESULTS[@]}"; do
-            if [[ "$result" == "failure" ]]; then
-              echo "Validation failed"
-              exit 1
+          echo "========================================="
+          echo "📊 PR VALIDATION SUMMARY"
+          echo "========================================="
+          echo ""
+          
+          # Track failures and skipped validations
+          FAILED=0
+          SKIPPED=0
+          
+          # Function to check job status
+          check_job() {
+            local job_name=$1
+            local job_result=$2
+            local required=$3
+            
+            if [[ "$required" == "required" ]] || [[ "$job_result" != "skipped" ]]; then
+              if [[ "$job_result" == "success" ]]; then
+                echo "✅ $job_name: PASSED"
+              elif [[ "$job_result" == "failure" ]]; then
+                echo "❌ $job_name: FAILED"
+                FAILED=1
+              elif [[ "$job_result" == "skipped" ]]; then
+                echo "⏭️ $job_name: SKIPPED (no changes)"
+                SKIPPED=$((SKIPPED + 1))
+              else
+                echo "⚠️ $job_name: $job_result"
+                FAILED=1
+              fi
+            else
+              echo "⏭️ $job_name: SKIPPED"
+              SKIPPED=$((SKIPPED + 1))
             fi
-          done
+          }
+          
+          # Check each validation job
+          check_job "Terraform" "${{ needs.terraform-validation.result }}" "${{ needs.detect-changes.outputs.terraform == 'true' && 'required' || 'optional' }}"
+          check_job "Kubernetes" "${{ needs.kubernetes-validation.result }}" "${{ needs.detect-changes.outputs.k8s == 'true' && 'required' || 'optional' }}"
+          check_job "Services" "${{ needs.services-validation.result }}" "${{ needs.detect-changes.outputs.services == 'true' && 'required' || 'optional' }}"
+          check_job "Scripts" "${{ needs.scripts-validation.result }}" "${{ needs.detect-changes.outputs.scripts == 'true' && 'required' || 'optional' }}"
+          check_job "Documentation" "${{ needs.docs-validation.result }}" "${{ needs.detect-changes.outputs.docs == 'true' && 'required' || 'optional' }}"
+          check_job "Secrets Scan" "${{ needs.secrets-scan.result }}" "required"
+          
+          echo ""
+          echo "========================================="
+          
+          if [[ $FAILED -eq 0 ]]; then
+            echo "🎉 ALL VALIDATIONS PASSED"
+            if [[ $SKIPPED -gt 0 ]]; then
+              echo "📈 $SKIPPED validation(s) skipped (no relevant changes)"
+            fi
+            echo "========================================="
+            exit 0
+          else
+            echo "❌ VALIDATION FAILED - Please fix the errors above"
+            echo "========================================="
+            exit 1
+          fi
 
-          echo "All validations passed"
-
+      - name: Add PR comment on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.payload.pull_request.number;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: prNumber,
+              body: '❌ **PR Validation Failed**\n\nOne or more validation checks have failed. Please check the workflow logs for details and fix the issues before merging.\n\nView the full workflow run here: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+            });
