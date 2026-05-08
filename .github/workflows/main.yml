@@ -29,9 +29,12 @@ jobs:
       docs: ${{ steps.filter.outputs.docs }}
       scripts: ${{ steps.filter.outputs.scripts }}
       environments: ${{ steps.set-env.outputs.envs }}
+      changed_services: ${{ steps.filter.outputs.changed_services }}
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for proper change detection
 
       - uses: dorny/paths-filter@v2
         id: filter
@@ -39,9 +42,17 @@ jobs:
           filters: |
             terraform: ['terraform/**']
             k8s: ['k8s/**']
-            services: ['services/api-gateway/**', 'services/eureka-server/**', 'services/movieService/**', 'services/userService/**', 'services/emailService/**', 'services/frontend/**']
+            services: ['services/**']
             docs: ['docs/**', 'README.md']
             scripts: ['scripts/**']
+            
+            # Individual service paths for granular change detection
+            api-gateway: ['services/api-gateway/**']
+            eureka-server: ['services/eureka-server/**']
+            movieService: ['services/movieService/**']
+            userService: ['services/userService/**']
+            emailService: ['services/emailService/**']
+            frontend: ['services/frontend/**']
 
       - id: set-env
         run: |
@@ -54,6 +65,17 @@ jobs:
           else
             echo 'envs=["dev"]' >> $GITHUB_OUTPUT
           fi
+      
+      - name: Debug - Show changed services
+        run: |
+          echo "Services directory changed: ${{ steps.filter.outputs.services }}"
+          echo "Individual service changes:"
+          echo "  api-gateway: ${{ steps.filter.outputs.api-gateway }}"
+          echo "  eureka-server: ${{ steps.filter.outputs.eureka-server }}"
+          echo "  movieService: ${{ steps.filter.outputs.movieService }}"
+          echo "  userService: ${{ steps.filter.outputs.userService }}"
+          echo "  emailService: ${{ steps.filter.outputs.emailService }}"
+          echo "  frontend: ${{ steps.filter.outputs.frontend }}"
 
 # --------------------------------
 # 2. Terraform Validation
@@ -159,7 +181,7 @@ jobs:
           done
 
 # --------------------------------
-# 4. Services Validation (Dynamic - Only Existing Services)
+# 4. Services Discovery & Change Detection
 # --------------------------------
   services-discovery:
     needs: detect-changes
@@ -168,35 +190,73 @@ jobs:
     outputs:
       services_matrix: ${{ steps.discover-services.outputs.matrix }}
       has_services: ${{ steps.discover-services.outputs.has_services }}
+      changed_services: ${{ steps.discover-services.outputs.changed_services }}
     
     steps:
       - uses: actions/checkout@v4
       
-      - name: Discover Available Services
+      - name: Discover Available Services and Track Changes
         id: discover-services
         run: |
           # Define all potential services
           ALL_SERVICES=("api-gateway" "eureka-server" "movieService" "userService" "emailService" "frontend")
           
-          # Check which services actually exist
-          AVAILABLE_SERVICES=()
+          # Track which services have changed
+          declare -A services_changed
           
-          echo "🔍 Scanning for available services..."
+          # Check service changes from detect-changes output
+          if [ -n "${{ needs.detect-changes.outputs.api-gateway }}" ]; then
+            services_changed["api-gateway"]="${{ needs.detect-changes.outputs.api-gateway }}"
+          fi
+          if [ -n "${{ needs.detect-changes.outputs.eureka-server }}" ]; then
+            services_changed["eureka-server"]="${{ needs.detect-changes.outputs.eureka-server }}"
+          fi
+          if [ -n "${{ needs.detect-changes.outputs.movieService }}" ]; then
+            services_changed["movieService"]="${{ needs.detect-changes.outputs.movieService }}"
+          fi
+          if [ -n "${{ needs.detect-changes.outputs.userService }}" ]; then
+            services_changed["userService"]="${{ needs.detect-changes.outputs.userService }}"
+          fi
+          if [ -n "${{ needs.detect-changes.outputs.emailService }}" ]; then
+            services_changed["emailService"]="${{ needs.detect-changes.outputs.emailService }}"
+          fi
+          if [ -n "${{ needs.detect-changes.outputs.frontend }}" ]; then
+            services_changed["frontend"]="${{ needs.detect-changes.outputs.frontend }}"
+          fi
+          
+          # Discover which services exist AND have changes
+          AVAILABLE_SERVICES=()
+          CHANGED_SERVICES=()
+          
+          echo "🔍 Scanning for available services with changes..."
           
           for service in "${ALL_SERVICES[@]}"; do
+            # Check if service directory exists
             if [ -d "services/$service" ]; then
-              # Additional check: at least have a build file
+              # Verify service has proper build file
               if [[ "$service" == "frontend" ]]; then
                 if [ -f "services/$service/package.json" ]; then
                   AVAILABLE_SERVICES+=("$service")
-                  echo "✅ Found service: $service"
+                  # Check if this service changed
+                  if [[ "${services_changed[$service]}" == "true" ]]; then
+                    CHANGED_SERVICES+=("$service")
+                    echo "✅ Service $service exists and HAS CHANGES - will validate"
+                  else
+                    echo "⏭️ Service $service exists but NO CHANGES - skipping validation"
+                  fi
                 else
                   echo "⚠️ Directory exists but no package.json: $service"
                 fi
               else
                 if [ -f "services/$service/pom.xml" ]; then
                   AVAILABLE_SERVICES+=("$service")
-                  echo "✅ Found service: $service"
+                  # Check if this service changed
+                  if [[ "${services_changed[$service]}" == "true" ]]; then
+                    CHANGED_SERVICES+=("$service")
+                    echo "✅ Service $service exists and HAS CHANGES - will validate"
+                  else
+                    echo "⏭️ Service $service exists but NO CHANGES - skipping validation"
+                  fi
                 else
                   echo "⚠️ Directory exists but no pom.xml: $service"
                 fi
@@ -206,22 +266,28 @@ jobs:
             fi
           done
           
-          # Convert to JSON for matrix
-          if [ ${#AVAILABLE_SERVICES[@]} -eq 0 ]; then
-            echo "No services found to validate"
+          # Convert to JSON for matrix (only changed services)
+          if [ ${#CHANGED_SERVICES[@]} -eq 0 ]; then
+            echo "No changed services found to validate"
             echo "matrix=[]" >> $GITHUB_OUTPUT
             echo "has_services=false" >> $GITHUB_OUTPUT
+            echo "changed_services=[]" >> $GITHUB_OUTPUT
           else
-            matrix_json=$(printf '%s\n' "${AVAILABLE_SERVICES[@]}" | jq -R . | jq -cs .)
+            matrix_json=$(printf '%s\n' "${CHANGED_SERVICES[@]}" | jq -R . | jq -cs .)
+            changed_json=$(printf '%s\n' "${CHANGED_SERVICES[@]}" | jq -R . | jq -cs .)
             echo "matrix=$matrix_json" >> $GITHUB_OUTPUT
             echo "has_services=true" >> $GITHUB_OUTPUT
-            echo "Found ${#AVAILABLE_SERVICES[@]} services to validate"
+            echo "changed_services=$changed_json" >> $GITHUB_OUTPUT
+            echo "Found ${#CHANGED_SERVICES[@]} service(s) with changes to validate: ${CHANGED_SERVICES[*]}"
           fi
           
       - name: Display Validation Plan
         run: |
-          echo "📋 Services to validate: ${{ steps.discover-services.outputs.matrix }}"
+          echo "📋 Services to validate (changed only): ${{ steps.discover-services.outputs.matrix }}"
 
+# --------------------------------
+# 5. Services Validation (Only Changed Services)
+# --------------------------------
   services-validation:
     needs: [detect-changes, services-discovery]
     if: needs.detect-changes.outputs.services == 'true' && needs.services-discovery.outputs.has_services == 'true'
@@ -275,6 +341,21 @@ jobs:
           
           echo "✅ Service structure validated"
           
+      - name: Determine Changed Files for Context
+        id: changed-files
+        run: |
+          # Get list of changed files for this specific service for better context
+          git fetch origin ${{ github.base_ref }}:${{ github.base_ref }}
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- "services/${{ matrix.service }}/")
+          
+          if [ -n "$CHANGED_FILES" ]; then
+            echo "📝 Changed files in ${{ matrix.service }}:"
+            echo "$CHANGED_FILES" | head -20
+            echo "changed_files_count=$(echo "$CHANGED_FILES" | wc -l)" >> $GITHUB_OUTPUT
+          else
+            echo "changed_files_count=0" >> $GITHUB_OUTPUT
+          fi
+          
       - name: Build & Test Service
         run: |
           set -e
@@ -287,6 +368,7 @@ jobs:
             echo "📦 Installing Node dependencies..."
             npm ci
             
+            # Run only if package.json has test script
             if grep -q '"test"' package.json; then
               echo "🧪 Running frontend tests..."
               npm run test --if-present
@@ -359,6 +441,12 @@ jobs:
             npm run lint --if-present
           fi
           
+          # Check for large dependency changes
+          if [ -f "package-lock.json" ]; then
+            DEPENDENCY_COUNT=$(jq '.packages | length' package-lock.json 2>/dev/null || echo "unknown")
+            echo "📦 Total dependencies: $DEPENDENCY_COUNT"
+          fi
+          
       - name: Upload Test Reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -371,16 +459,16 @@ jobs:
             services/${{ matrix.service }}/test-reports/
           retention-days: 7
           
-      - name: Upload Build Artifacts (Optional)
-        if: success() && github.event_name == 'pull_request'
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-${{ matrix.service }}-${{ github.run_id }}
-          path: |
-            services/${{ matrix.service }}/target/*.jar
-            services/${{ matrix.service }}/dist/
-            services/${{ matrix.service }}/build/
-          retention-days: 3
+      # - name: Upload Build Artifacts (Optional)
+      #   if: success() && github.event_name == 'pull_request'
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: build-${{ matrix.service }}-${{ github.run_id }}
+      #     path: |
+      #       services/${{ matrix.service }}/target/*.jar
+      #       services/${{ matrix.service }}/dist/
+      #       services/${{ matrix.service }}/build/
+      #     retention-days: 3
           
       - name: Service Validation Failed
         if: failure()
@@ -394,7 +482,7 @@ jobs:
           echo "  - Service directory structure incorrect"
 
 # --------------------------------
-# 5. Scripts Validation
+# 6. Scripts Validation
 # --------------------------------
   scripts-validation:
     needs: detect-changes
@@ -434,7 +522,7 @@ jobs:
           fi
 
 # --------------------------------
-# 6. Documentation Validation
+# 7. Documentation Validation
 # --------------------------------
   docs-validation:
     needs: detect-changes
@@ -452,7 +540,7 @@ jobs:
           base-branch: ${{ github.base_ref }}
 
 # --------------------------------
-# 7. Security Scan
+# 8. Security Scan
 # --------------------------------
   secrets-scan:
     runs-on: ubuntu-latest
@@ -479,7 +567,7 @@ jobs:
           gitleaks detect --source . --redact --verbose --exit-code 1
 
 # --------------------------------
-# 8. Quality Gate
+# 9. Quality Gate
 # --------------------------------
   quality-gate:
     needs: [terraform-validation, kubernetes-validation, services-validation, scripts-validation, docs-validation, secrets-scan]
@@ -488,22 +576,66 @@ jobs:
     steps:
       - name: Evaluate Results
         run: |
-          if [[ "${{ needs.terraform-validation.result }}" == "failure" ]] || \
-             [[ "${{ needs.kubernetes-validation.result }}" == "failure" ]] || \
-             [[ "${{ needs.services-validation.result }}" == "failure" ]] || \
-             [[ "${{ needs.scripts-validation.result }}" == "failure" ]] || \
-             [[ "${{ needs.docs-validation.result }}" == "failure" ]] || \
-             [[ "${{ needs.secrets-scan.result }}" == "failure" ]]; then
-            echo "❌ Validation failed"
-            exit 1
+          FAILED=0
+          
+          # Check each validation job
+          if [[ "${{ needs.terraform-validation.result }}" == "failure" ]]; then
+            echo "❌ Terraform validation failed"
+            FAILED=1
           fi
           
-          # Also check if services-validation was skipped but services should have been validated
+          if [[ "${{ needs.kubernetes-validation.result }}" == "failure" ]]; then
+            echo "❌ Kubernetes validation failed"
+            FAILED=1
+          fi
+          
+          if [[ "${{ needs.services-validation.result }}" == "failure" ]]; then
+            echo "❌ Services validation failed"
+            FAILED=1
+          fi
+          
+          if [[ "${{ needs.scripts-validation.result }}" == "failure" ]]; then
+            echo "❌ Scripts validation failed"
+            FAILED=1
+          fi
+          
+          if [[ "${{ needs.docs-validation.result }}" == "failure" ]]; then
+            echo "❌ Documentation validation failed"
+            FAILED=1
+          fi
+          
+          if [[ "${{ needs.secrets-scan.result }}" == "failure" ]]; then
+            echo "❌ Secrets scan failed"
+            FAILED=1
+          fi
+          
+          # Special check: Services changed but no validation ran
           if [[ "${{ needs.detect-changes.outputs.services }}" == "true" ]] && \
              [[ "${{ needs.services-validation.result }}" == "skipped" ]] && \
              [[ "${{ needs.services-discovery.outputs.has_services }}" == "false" ]]; then
-            echo "⚠️ Warning: Services changed but no valid service directories found"
-            echo "This might indicate misconfigured service paths"
+            echo "⚠️ Warning: Services directory changed but no valid service directories found"
+            echo "This might indicate misconfigured service paths or missing build files"
+            FAILED=1
           fi
           
-          echo "🎉 All validations passed!"
+          # Success message if everything passed or was skipped appropriately
+          if [[ $FAILED -eq 0 ]]; then
+            echo "🎉 All validations passed!"
+            
+            # Show summary of what was validated
+            echo ""
+            echo "📊 Validation Summary:"
+            [[ "${{ needs.terraform-validation.result }}" == "success" ]] && echo "  ✅ Terraform: Validated"
+            [[ "${{ needs.terraform-validation.result }}" == "skipped" ]] && echo "  ⏭️ Terraform: No changes"
+            [[ "${{ needs.kubernetes-validation.result }}" == "success" ]] && echo "  ✅ Kubernetes: Validated"
+            [[ "${{ needs.kubernetes-validation.result }}" == "skipped" ]] && echo "  ⏭️ Kubernetes: No changes"
+            [[ "${{ needs.services-validation.result }}" == "success" ]] && echo "  ✅ Services: Validated changed services"
+            [[ "${{ needs.services-validation.result }}" == "skipped" ]] && echo "  ⏭️ Services: No changes or no services to validate"
+            [[ "${{ needs.scripts-validation.result }}" == "success" ]] && echo "  ✅ Scripts: Validated"
+            [[ "${{ needs.scripts-validation.result }}" == "skipped" ]] && echo "  ⏭️ Scripts: No changes"
+            [[ "${{ needs.docs-validation.result }}" == "success" ]] && echo "  ✅ Documentation: Validated"
+            [[ "${{ needs.docs-validation.result }}" == "skipped" ]] && echo "  ⏭️ Documentation: No changes"
+            [[ "${{ needs.secrets-scan.result }}" == "success" ]] && echo "  ✅ Secrets Scan: No secrets detected"
+          else
+            exit 1
+          fi
