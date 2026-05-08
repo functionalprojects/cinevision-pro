@@ -15,7 +15,7 @@
     <name>api-gateway</name>
 
     <properties>
-        <!-- Ensure Java  17+ (compatible with parent) -->
+        <!-- Ensure Java 17+ (compatible with parent) -->
         <java.version>17</java.version>
         <maven.compiler.source>17</maven.compiler.source>
         <maven.compiler.target>17</maven.compiler.target>
