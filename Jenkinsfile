@@ -41,6 +41,10 @@ def getEnvironmentConfig() {
       argocdApp: 'cinevision-prod-green',
       frontendBucket: env.PROD_FRONTEND_BUCKET,
       cloudfrontDistributionId: env.PROD_CLOUDFRONT_DISTRIBUTION_ID,
+      posterBucket: env.PROD_MOVIE_POSTERS_BUCKET,
+      posterCloudfrontId: env.PROD_POSTER_CLOUDFRONT_ID,
+      archiveBucket: env.PROD_EMAIL_ARCHIVES_BUCKET,
+      archiveCloudfrontId: env.PROD_ARCHIVE_CLOUDFRONT_ID,
       apiUrl: env.PROD_API_URL,
       kustomizeOverlay: env.PROD_GREEN_OVERLAY,
       deployEnabled: true,
@@ -60,6 +64,10 @@ def getEnvironmentConfig() {
       argocdApp: 'cinevision-staging',
       frontendBucket: env.STAGING_FRONTEND_BUCKET,
       cloudfrontDistributionId: env.STAGING_CLOUDFRONT_DISTRIBUTION_ID,
+      posterBucket: env.STAGING_MOVIE_POSTERS_BUCKET,
+      posterCloudfrontId: env.STAGING_POSTER_CLOUDFRONT_ID,
+      archiveBucket: env.STAGING_EMAIL_ARCHIVES_BUCKET,
+      archiveCloudfrontId: env.STAGING_ARCHIVE_CLOUDFRONT_ID,
       apiUrl: env.STAGING_API_URL,
       kustomizeOverlay: env.STAGING_OVERLAY,
       deployEnabled: true,
@@ -79,6 +87,10 @@ def getEnvironmentConfig() {
       argocdApp: 'cinevision-dev',
       frontendBucket: env.DEV_FRONTEND_BUCKET,
       cloudfrontDistributionId: env.DEV_CLOUDFRONT_DISTRIBUTION_ID,
+      posterBucket: env.DEV_MOVIE_POSTERS_BUCKET,
+      posterCloudfrontId: env.DEV_POSTER_CLOUDFRONT_ID,
+      archiveBucket: env.DEV_EMAIL_ARCHIVES_BUCKET,
+      archiveCloudfrontId: env.DEV_ARCHIVE_CLOUDFRONT_ID,
       apiUrl: env.DEV_API_URL,
       kustomizeOverlay: env.DEV_OVERLAY,
       deployEnabled: true,
@@ -130,13 +142,29 @@ pipeline {
     
     TRIVY_SEVERITY = 'HIGH,CRITICAL'
     
-    DEV_FRONTEND_BUCKET      = 'cinevision-dev-frontend'
-    STAGING_FRONTEND_BUCKET  = 'cinevision-staging-frontend'
-    PROD_FRONTEND_BUCKET     = 'cinevision-prod-frontend'
+    DEV_FRONTEND_BUCKET      = 'dev-cinevision-dev-frontend'
+    STAGING_FRONTEND_BUCKET  = 'staging-cinevision-staging-frontend'
+    PROD_FRONTEND_BUCKET     = 'prod-cinevision-prod-frontend'
+    
+    DEV_MOVIE_POSTERS_BUCKET      = 'dev-cinevision-dev-movie-posters'
+    STAGING_MOVIE_POSTERS_BUCKET  = 'staging-cinevision-staging-movie-posters'
+    PROD_MOVIE_POSTERS_BUCKET     = 'prod-cinevision-prod-movie-posters'
+    
+    DEV_EMAIL_ARCHIVES_BUCKET     = 'dev-cinevision-dev-email-archives'
+    STAGING_EMAIL_ARCHIVES_BUCKET = 'staging-cinevision-staging-email-archives'
+    PROD_EMAIL_ARCHIVES_BUCKET    = 'prod-cinevision-prod-email-archives'
     
     DEV_CLOUDFRONT_DISTRIBUTION_ID      = credentials('DEV_CLOUDFRONT_DISTRIBUTION_ID')
+    DEV_POSTER_CLOUDFRONT_ID           = credentials('DEV_POSTER_CLOUDFRONT_ID')
+    DEV_ARCHIVE_CLOUDFRONT_ID          = credentials('DEV_ARCHIVE_CLOUDFRONT_ID')
+    
     STAGING_CLOUDFRONT_DISTRIBUTION_ID  = credentials('STAGING_CLOUDFRONT_DISTRIBUTION_ID')
+    STAGING_POSTER_CLOUDFRONT_ID       = credentials('STAGING_POSTER_CLOUDFRONT_ID')
+    STAGING_ARCHIVE_CLOUDFRONT_ID      = credentials('STAGING_ARCHIVE_CLOUDFRONT_ID')
+    
     PROD_CLOUDFRONT_DISTRIBUTION_ID     = credentials('PROD_CLOUDFRONT_DISTRIBUTION_ID')
+    PROD_POSTER_CLOUDFRONT_ID          = credentials('PROD_POSTER_CLOUDFRONT_ID')
+    PROD_ARCHIVE_CLOUDFRONT_ID         = credentials('PROD_ARCHIVE_CLOUDFRONT_ID')
     
     GITHUB_REPO = 'functionalprojects/cinevision-pro'
   }
@@ -152,6 +180,13 @@ pipeline {
           env.CURRENT_API_URL = env.CONFIG.apiUrl
           env.CURRENT_FRONTEND_BUCKET = env.CONFIG.frontendBucket ?: ''
           env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID = env.CONFIG.cloudfrontDistributionId ?: ''
+          
+          env.CURRENT_POSTER_BUCKET = env.CONFIG.posterBucket ?: ''
+          env.CURRENT_POSTER_CLOUDFRONT_ID = env.CONFIG.posterCloudfrontId ?: ''
+          
+          env.CURRENT_ARCHIVE_BUCKET = env.CONFIG.archiveBucket ?: ''
+          env.CURRENT_ARCHIVE_CLOUDFRONT_ID = env.CONFIG.archiveCloudfrontId ?: ''
+          
           env.DEPLOY_ENABLED = env.CONFIG.deployEnabled.toString()
           env.BUILD_IMAGES = env.CONFIG.buildImages.toString()
           
@@ -259,8 +294,15 @@ pipeline {
               sh 'npm run build'
               sh "aws s3 sync dist s3://${env.CURRENT_FRONTEND_BUCKET} --delete"
               
-              if (env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID && env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID != '****') {
+              if (env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID && env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID != '****' && env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID != '') {
                 sh "aws cloudfront create-invalidation --distribution-id ${env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID} --paths '/*'"
+              }
+              
+              if (env.CHANGED_SERVICES?.split(',')?.contains('movieService') && env.CURRENT_POSTER_CLOUDFRONT_ID && env.CURRENT_POSTER_CLOUDFRONT_ID != '****' && env.CURRENT_POSTER_CLOUDFRONT_ID != '') {
+                sh "aws cloudfront create-invalidation --distribution-id ${env.CURRENT_POSTER_CLOUDFRONT_ID} --paths '/*'"
+              }
+              if (env.CHANGED_SERVICES?.split(',')?.contains('emailService') && env.CURRENT_ARCHIVE_CLOUDFRONT_ID && env.CURRENT_ARCHIVE_CLOUDFRONT_ID != '****' && env.CURRENT_ARCHIVE_CLOUDFRONT_ID != '') {
+                sh "aws cloudfront create-invalidation --distribution-id ${env.CURRENT_ARCHIVE_CLOUDFRONT_ID} --paths '/*'"
               }
             }
           }
