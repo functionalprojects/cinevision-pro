@@ -113,8 +113,9 @@ pipeline {
   options {
     timestamps()
     disableConcurrentBuilds()
-    ansiColor('xterm')
+    // REMOVED: ansiColor('xterm') - Cannot be in options block
     buildDiscarder(logRotator(numToKeepStr: '30'))
+    timeout(time: 60, unit: 'MINUTES') // Add global timeout
   }
   
   environment {
@@ -137,11 +138,7 @@ pipeline {
     PROD_GREEN_OVERLAY = 'k8s/overlays/prod/green'
     
     // API URLs
-
-
     DEV_API_URL      = 'https://dev-api.cinevisionca.link'
-
-
     STAGING_API_URL  = 'https://staging-api.cinevision.com'
     PROD_API_URL     = 'https://api.cinevision.com'
     
@@ -178,17 +175,20 @@ pipeline {
           env.DEPLOY_ENABLED = env.CONFIG.deployEnabled.toString()
           env.BUILD_IMAGES = env.CONFIG.buildImages.toString()
           
-          echo """
-            ========================================
-            JENKINS CI/CD PIPELINE
-            ========================================
-            Branch: ${env.BRANCH_NAME}
-            Target Environment: ${env.TARGET_ENV}
-            ECR Registry: ${env.CURRENT_ECR_REGISTRY}
-            Deploy Enabled: ${env.DEPLOY_ENABLED}
-            Build Images: ${env.BUILD_IMAGES}
-            ========================================
-          """
+          // ANSI Color applied here instead of options block
+          wrap([$class: 'AnsiColorBuildWrapper', 'colorMapName': 'xterm']) {
+            echo """
+              ========================================
+              JENKINS CI/CD PIPELINE
+              ========================================
+              Branch: ${env.BRANCH_NAME}
+              Target Environment: ${env.TARGET_ENV}
+              ECR Registry: ${env.CURRENT_ECR_REGISTRY}
+              Deploy Enabled: ${env.DEPLOY_ENABLED}
+              Build Images: ${env.BUILD_IMAGES}
+              ========================================
+            """
+          }
         }
       }
     }
@@ -212,7 +212,9 @@ pipeline {
         script {
           def changed = detectChangedServices()
           env.CHANGED_SERVICES = changed.join(',')
-          echo "Changed services detected: ${env.CHANGED_SERVICES}"
+          wrap([$class: 'AnsiColorBuildWrapper', 'colorMapName': 'xterm']) {
+            echo "Changed services detected: ${env.CHANGED_SERVICES}"
+          }
         }
       }
     }
@@ -224,10 +226,12 @@ pipeline {
       steps {
         script {
           withAWS(credentials: env.CONFIG.awsCredentialsId, region: env.AWS_REGION) {
-            sh """
-              aws ecr get-login-password --region ${env.AWS_REGION} \
-                | docker login --username AWS --password-stdin ${env.CURRENT_ECR_REGISTRY}
-            """
+            wrap([$class: 'AnsiColorBuildWrapper', 'colorMapName': 'xterm']) {
+              sh """
+                aws ecr get-login-password --region ${env.AWS_REGION} \
+                  | docker login --username AWS --password-stdin ${env.CURRENT_ECR_REGISTRY}
+              """
+            }
           }
         }
       }
@@ -243,7 +247,9 @@ pipeline {
             def services = env.CHANGED_SERVICES.split(',')
             services.each { serviceName ->
               def meta = serviceMap[serviceName]
-              echo "Running SonarCloud SAST for ${serviceName}"
+              wrap([$class: 'AnsiColorBuildWrapper', 'colorMapName': 'xterm']) {
+                echo "Running SonarCloud SAST for ${serviceName}"
+              }
               dir(meta.path) {
                 if (meta.type == 'maven') {
                   sh 'mvn verify sonar:sonar -DskipTests'
@@ -270,7 +276,9 @@ pipeline {
             def fullImageName = "${env.IMAGE_NAMESPACE}/${meta.image}"
             def imageTag = "${env.CURRENT_ECR_REGISTRY}/${fullImageName}:${env.IMAGE_TAG}"
             
-            echo "Building service: ${serviceName} (${meta.type})"
+            wrap([$class: 'AnsiColorBuildWrapper', 'colorMapName': 'xterm']) {
+              echo "Building service: ${serviceName} (${meta.type})"
+            }
             
             dir(meta.path) {
               // Build Docker image
@@ -333,13 +341,15 @@ pipeline {
             }
             
             // Commit and push kustomize changes
-            sh """
-              git config user.email "jenkins@cinevision.com"
-              git config user.name "Jenkins CI"
-              git add ${env.CONFIG.kustomizeOverlay}
-              git commit -m "[CI] Update images for ${env.TARGET_ENV} - Build ${env.BUILD_NUMBER}" || echo "No changes to commit"
-              git push origin ${env.BRANCH_NAME}
-            """
+            wrap([$class: 'AnsiColorBuildWrapper', 'colorMapName': 'xterm']) {
+              sh """
+                git config user.email "jenkins@cinevision.com"
+                git config user.name "Jenkins CI"
+                git add ${env.CONFIG.kustomizeOverlay}
+                git commit -m "[CI] Update images for ${env.TARGET_ENV} - Build ${env.BUILD_NUMBER}" || echo "No changes to commit"
+                git push origin ${env.BRANCH_NAME}
+              """
+            }
           }
         }
       }
@@ -356,11 +366,13 @@ pipeline {
       steps {
         script {
           withAWS(credentials: env.CONFIG.awsCredentialsId, region: env.AWS_REGION) {
-            // Sync ArgoCD application
-            sh "argocd app sync ${env.CONFIG.argocdApp} --grpc-web --prune"
-            
-            // Wait for sync to complete
-            sh "argocd app wait ${env.CONFIG.argocdApp} --health --operation --timeout 300"
+            wrap([$class: 'AnsiColorBuildWrapper', 'colorMapName': 'xterm']) {
+              // Sync ArgoCD application
+              sh "argocd app sync ${env.CONFIG.argocdApp} --grpc-web --prune"
+              
+              // Wait for sync to complete
+              sh "argocd app wait ${env.CONFIG.argocdApp} --health --operation --timeout 300"
+            }
           }
         }
       }
@@ -384,7 +396,9 @@ pipeline {
         script {
           dir('tests/integration') {
             sh 'npm ci'
-            sh "BASE_URL=${env.CURRENT_API_URL} npm test"
+            wrap([$class: 'AnsiColorBuildWrapper', 'colorMapName': 'xterm']) {
+              sh "BASE_URL=${env.CURRENT_API_URL} npm test"
+            }
           }
         }
       }
@@ -402,11 +416,13 @@ pipeline {
       steps {
         script {
           withAWS(credentials: env.CONFIG.awsCredentialsId, region: env.AWS_REGION) {
-            echo "Shifting traffic to green deployment"
-            sh "kubectl -n ${env.CONFIG.namespace} apply -k ${env.PROD_GREEN_OVERLAY}"
-            
-            // Wait for traffic shift to complete
-            sh "kubectl -n ${env.CONFIG.namespace} rollout status deployment -l app=cinevision --timeout=5m"
+            wrap([$class: 'AnsiColorBuildWrapper', 'colorMapName': 'xterm']) {
+              echo "Shifting traffic to green deployment"
+              sh "kubectl -n ${env.CONFIG.namespace} apply -k ${env.PROD_GREEN_OVERLAY}"
+              
+              // Wait for traffic shift to complete
+              sh "kubectl -n ${env.CONFIG.namespace} rollout status deployment -l app=cinevision --timeout=5m"
+            }
           }
         }
       }
@@ -421,7 +437,9 @@ pipeline {
       }
       steps {
         script {
-          sh "k6 run tests/performance/smoke-test.js -e BASE_URL=${env.STAGING_API_URL}"
+          wrap([$class: 'AnsiColorBuildWrapper', 'colorMapName': 'xterm']) {
+            sh "k6 run tests/performance/smoke-test.js -e BASE_URL=${env.STAGING_API_URL}"
+          }
         }
       }
       post {
@@ -447,11 +465,13 @@ pipeline {
               sh 'npm ci'
               sh 'npm run build'
               
-              // Sync to S3
-              sh "aws s3 sync dist s3://${env.CURRENT_FRONTEND_BUCKET} --delete --exact-timestamps"
-              
-              // Invalidate CloudFront cache
-              sh "aws cloudfront create-invalidation --distribution-id ${env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID} --paths '/*'"
+              wrap([$class: 'AnsiColorBuildWrapper', 'colorMapName': 'xterm']) {
+                // Sync to S3
+                sh "aws s3 sync dist s3://${env.CURRENT_FRONTEND_BUCKET} --delete --exact-timestamps"
+                
+                // Invalidate CloudFront cache
+                sh "aws cloudfront create-invalidation --distribution-id ${env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID} --paths '/*'"
+              }
             }
           }
         }
@@ -470,7 +490,9 @@ pipeline {
         script {
           dir('tests/smoke') {
             sh 'npm ci'
-            sh "npm test -- --env=${env.TARGET_ENV} --services=${env.CHANGED_SERVICES}"
+            wrap([$class: 'AnsiColorBuildWrapper', 'colorMapName': 'xterm']) {
+              sh "npm test -- --env=${env.TARGET_ENV} --services=${env.CHANGED_SERVICES}"
+            }
           }
         }
       }
@@ -501,10 +523,12 @@ pipeline {
       steps {
         script {
           withCredentials([string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN')]) {
-            sh """
-              git tag -a release-${env.IMAGE_TAG} -m "Release ${env.IMAGE_TAG} - Build ${env.BUILD_NUMBER}"
-              git push https://\${GITHUB_TOKEN}@github.com/${env.GITHUB_REPO}.git release-${env.IMAGE_TAG}
-            """
+            wrap([$class: 'AnsiColorBuildWrapper', 'colorMapName': 'xterm']) {
+              sh """
+                git tag -a release-${env.IMAGE_TAG} -m "Release ${env.IMAGE_TAG} - Build ${env.BUILD_NUMBER}"
+                git push https://\${GITHUB_TOKEN}@github.com/${env.GITHUB_REPO}.git release-${env.IMAGE_TAG}
+              """
+            }
           }
         }
       }
@@ -515,18 +539,20 @@ pipeline {
     success {
       script {
         def duration = currentBuild.durationString
-        echo """
-          ========================================
-          ✅ PIPELINE SUCCESSFUL
-          ========================================
-          Branch: ${env.BRANCH_NAME}
-          Environment: ${env.TARGET_ENV}
-          Duration: ${duration}
-          Services Built: ${env.CHANGED_SERVICES}
-          Image Tag: ${env.IMAGE_TAG}
-          Commit: ${env.GIT_COMMIT_SHORT}
-          ========================================
-        """
+        wrap([$class: 'AnsiColorBuildWrapper', 'colorMapName': 'xterm']) {
+          echo """
+            ========================================
+            ✅ PIPELINE SUCCESSFUL
+            ========================================
+            Branch: ${env.BRANCH_NAME}
+            Environment: ${env.TARGET_ENV}
+            Duration: ${duration}
+            Services Built: ${env.CHANGED_SERVICES}
+            Image Tag: ${env.IMAGE_TAG}
+            Commit: ${env.GIT_COMMIT_SHORT}
+            ========================================
+          """
+        }
         
         // Send Slack notification for production deployments
         if (env.TARGET_ENV == 'prod') {
@@ -549,6 +575,16 @@ pipeline {
     
     failure {
       script {
+        wrap([$class: 'AnsiColorBuildWrapper', 'colorMapName': 'xterm']) {
+          echo """
+            ❌ Pipeline FAILED
+            Branch: ${env.BRANCH_NAME}
+            Environment: ${env.TARGET_ENV}
+            Build: ${env.BUILD_URL}
+            Services: ${env.CHANGED_SERVICES}
+          """
+        }
+        
         slackSend(
           color: 'danger',
           message: """
@@ -571,4 +607,4 @@ pipeline {
       cleanWs()
     }
   }
-} 
+}
