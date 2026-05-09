@@ -108,6 +108,7 @@ def getEnvironmentConfig() {
 }
 
 pipeline {
+  // CRITICAL FIX: Agent must be defined at top level
   agent any
   
   options {
@@ -115,7 +116,6 @@ pipeline {
     disableConcurrentBuilds()
     buildDiscarder(logRotator(numToKeepStr: '30'))
     timeout(time: 60, unit: 'MINUTES')
-    // Ensure workspace is cleaned before build starts
     skipDefaultCheckout()
   }
   
@@ -157,41 +157,51 @@ pipeline {
     PROD_CLOUDFRONT_DISTRIBUTION_ID     = credentials('PROD_CLOUDFRONT_DISTRIBUTION_ID')
     
     // Git configuration
-    GITHUB_REPO = credentials('GITHUB_REPO')
+    GITHUB_REPO = 'functionalprojects/cinevision-pro'
+    
+    // Slack configuration (make optional)
+    SLACK_CHANNEL = credentials('SLACK_CHANNEL')
   }
   
   stages {
     stage('Initialize') {
       steps {
         script {
-          // Load environment configuration
-          env.CONFIG = getEnvironmentConfig()
-          env.TARGET_ENV = env.CONFIG.env
-          
-          // Set environment-specific variables
-          env.CURRENT_ECR_REGISTRY = "${env.CONFIG.awsAccountId}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
-          env.CURRENT_API_URL = env.CONFIG.apiUrl
-          env.CURRENT_FRONTEND_BUCKET = env.CONFIG.frontendBucket ?: ''
-          env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID = env.CONFIG.cloudfrontDistributionId ?: ''
-          env.DEPLOY_ENABLED = env.CONFIG.deployEnabled.toString()
-          env.BUILD_IMAGES = env.CONFIG.buildImages.toString()
-          
-          // Validate required environment variables before proceeding
-          if (env.TARGET_ENV == 'dev' && !env.CONFIG.cloudfrontDistributionId) {
-            error("DEV_CLOUDFRONT_DISTRIBUTION_ID is required but not set")
+          try {
+            // Load environment configuration
+            env.CONFIG = getEnvironmentConfig()
+            env.TARGET_ENV = env.CONFIG.env
+            
+            // Set environment-specific variables
+            env.CURRENT_ECR_REGISTRY = "${env.CONFIG.awsAccountId}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
+            env.CURRENT_API_URL = env.CONFIG.apiUrl
+            env.CURRENT_FRONTEND_BUCKET = env.CONFIG.frontendBucket ?: ''
+            env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID = env.CONFIG.cloudfrontDistributionId ?: ''
+            env.DEPLOY_ENABLED = env.CONFIG.deployEnabled.toString()
+            env.BUILD_IMAGES = env.CONFIG.buildImages.toString()
+            
+            // Validate required environment variables before proceeding
+            if (env.TARGET_ENV == 'dev' && (!env.CONFIG.cloudfrontDistributionId || env.CONFIG.cloudfrontDistributionId?.trim() == '')) {
+              error("DEV_CLOUDFRONT_DISTRIBUTION_ID is required but not set or empty")
+            }
+            
+            echo """
+              ========================================
+              JENKINS CI/CD PIPELINE
+              ========================================
+              Branch: ${env.BRANCH_NAME}
+              Target Environment: ${env.TARGET_ENV}
+              ECR Registry: ${env.CURRENT_ECR_REGISTRY}
+              Deploy Enabled: ${env.DEPLOY_ENABLED}
+              Build Images: ${env.BUILD_IMAGES}
+              CloudFront ID Configured: ${env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID ? 'Yes' : 'No'}
+              ========================================
+            """
+          } catch (Exception e) {
+            echo "ERROR in initialization: ${e.message}"
+            currentBuild.result = 'FAILURE'
+            error(e.message)
           }
-          
-          echo """
-            ========================================
-            JENKINS CI/CD PIPELINE
-            ========================================
-            Branch: ${env.BRANCH_NAME}
-            Target Environment: ${env.TARGET_ENV}
-            ECR Registry: ${env.CURRENT_ECR_REGISTRY}
-            Deploy Enabled: ${env.DEPLOY_ENABLED}
-            Build Images: ${env.BUILD_IMAGES}
-            ========================================
-          """
         }
       }
     }
@@ -213,9 +223,11 @@ pipeline {
       }
       steps {
         script {
-          def changed = detectChangedServices()
-          env.CHANGED_SERVICES = changed.join(',')
-          echo "Changed services detected: ${env.CHANGED_SERVICES}"
+          if (env.BUILD_IMAGES == 'true') {
+            def changed = detectChangedServices()
+            env.CHANGED_SERVICES = changed.join(',')
+            echo "Changed services detected: ${env.CHANGED_SERVICES}"
+          }
         }
       }
     }
@@ -453,8 +465,12 @@ pipeline {
               // Sync to S3
               sh "aws s3 sync dist s3://${env.CURRENT_FRONTEND_BUCKET} --delete --exact-timestamps"
               
-              // Invalidate CloudFront cache
-              sh "aws cloudfront create-invalidation --distribution-id ${env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID} --paths '/*'"
+              // Invalidate CloudFront cache only if distribution ID is provided
+              if (env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID && env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID.trim() != '') {
+                sh "aws cloudfront create-invalidation --distribution-id ${env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID} --paths '/*'"
+              } else {
+                echo "WARNING: No CloudFront distribution ID provided - skipping cache invalidation"
+              }
             }
           }
         }
@@ -532,18 +548,22 @@ pipeline {
           ========================================
         """
         
-        // Send Slack notification for production deployments
+        // Send Slack notification for production deployments (only if credentials are available)
         if (env.TARGET_ENV == 'prod') {
-          slackSend(
-            color: 'good',
-            message: """
-              ✅ Production Deployment Successful
-              Branch: ${env.BRANCH_NAME}
-              Services: ${env.CHANGED_SERVICES}
-              Image: ${env.IMAGE_TAG}
-              Build: ${env.BUILD_URL}
-            """.stripIndent()
-          )
+          try {
+            slackSend(
+              color: 'good',
+              message: """
+                ✅ Production Deployment Successful
+                Branch: ${env.BRANCH_NAME}
+                Services: ${env.CHANGED_SERVICES}
+                Image: ${env.IMAGE_TAG}
+                Build: ${env.BUILD_URL}
+              """.stripIndent()
+            )
+          } catch (Exception e) {
+            echo "Slack notification failed (non-fatal): ${e.message}"
+          }
         }
         
         // Archive test results
@@ -561,41 +581,53 @@ pipeline {
           Services: ${env.CHANGED_SERVICES}
         """
         
-        slackSend(
-          color: 'danger',
-          message: """
-            ❌ Pipeline FAILED
-            Branch: ${env.BRANCH_NAME}
-            Environment: ${env.TARGET_ENV}
-            Build: ${env.BUILD_URL}
-            Services: ${env.CHANGED_SERVICES}
-          """.stripIndent()
-        )
+        // Try to send Slack notification but don't fail if it doesn't work
+        try {
+          slackSend(
+            color: 'danger',
+            message: """
+              ❌ Pipeline FAILED
+              Branch: ${env.BRANCH_NAME}
+              Environment: ${env.TARGET_ENV}
+              Build: ${env.BUILD_URL}
+              Services: ${env.CHANGED_SERVICES}
+            """.stripIndent()
+          )
+        } catch (Exception e) {
+          echo "Slack notification failed (non-fatal): ${e.message}"
+        }
         
-        // Archive error logs
-        archiveArtifacts artifacts: '**/hs_err_pid*.log, **/error.log, **/target/surefire-reports/*.xml', 
-                       allowEmptyArchive: true
+        // Archive error logs (only if we can access files)
+        try {
+          archiveArtifacts artifacts: '**/hs_err_pid*.log, **/error.log, **/target/surefire-reports/*.xml', 
+                         allowEmptyArchive: true
+        } catch (Exception e) {
+          echo "Failed to archive artifacts: ${e.message}"
+        }
       }
     }
     
     always {
-      // Clean up workspace - wrapped in script block to handle errors gracefully
+      // Clean up workspace - wrapped in script block with error handling
       script {
         try {
-          // Only clean workspace if we're in a node context
-          if (env.NODE_NAME) {
-            cleanWs(
-              cleanWhenNotBuilt: false,
-              deleteDirs: true,
-              disableDeferredWipeout: true
-            )
-            echo "Workspace cleaned successfully on node: ${env.NODE_NAME}"
-          } else {
-            echo "Skipping workspace cleanup: No node context available"
-          }
+          echo "Starting workspace cleanup..."
+          cleanWs(
+            cleanWhenNotBuilt: false,
+            deleteDirs: true,
+            disableDeferredWipeout: false
+          )
+          echo "Workspace cleanup completed successfully"
         } catch (Exception e) {
-          echo "Warning: Failed to clean workspace - ${e.message}"
-          echo "This is not fatal, continuing with pipeline completion"
+          echo "WARNING: Workspace cleanup failed - ${e.message}"
+          echo "This may be due to file permissions or locked files"
+          // Try alternative cleanup method
+          try {
+            sh 'rm -rf * || true'
+            echo "Alternative cleanup completed"
+          } catch (Exception e2) {
+            echo "Alternative cleanup also failed: ${e2.message}"
+          }
         }
       }
     }
