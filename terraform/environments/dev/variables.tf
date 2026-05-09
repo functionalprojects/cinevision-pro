@@ -63,7 +63,7 @@ variable "email_archives_bucket_name" {
   default = "dev-cinevision-dev-email-archives"
   validation {
     condition     = !strcontains(var.email_archives_bucket_name, "BUCKET_NAME")
-    error_message = "email_archives_bucket_name still  contains BUCKET_NAME placeholder."
+    error_message = "email_archives_bucket_name still contains BUCKET_NAME placeholder."
   }
 }
 variable "frontend_aliases" {
@@ -93,7 +93,7 @@ variable "node_groups" {
   }))
   default = {
     general = {
-      instance_types = ["t3.large"]
+      instance_types = ["t3.medium"]
       desired_size   = 2
       min_size       = 2
       max_size       = 4
