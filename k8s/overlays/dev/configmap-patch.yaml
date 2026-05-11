@@ -8,3 +8,5 @@ data:
   REDIS_HOST: "cinevision-dev-redis.cache.amazonaws.com"
   KAFKA_BOOTSTRAP_SERVERS: "b-1.dev-msk.amazonaws.com:9094,b-2.dev-msk.amazonaws.com:9094"
   MAIL_HOST: "mailhog.dev.svc.cluster.local"
+
+  # hello
