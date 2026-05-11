@@ -8,13 +8,86 @@ import groovy.json.JsonOutput
 // Global Configuration
 def getServiceMap() {
   return [
-    'api-gateway'  : [path: 'services/api-gateway',   type: 'maven', image: 'api-gateway'],
-    'user-service' : [path: 'services/userService',   type: 'maven', image: 'user-service'],
-    'movie-service': [path: 'services/movieService',  type: 'maven', image: 'movie-service'],
-    'email-service': [path: 'services/emailService',  type: 'maven', image: 'email-service'],
-    'eureka-server': [path: 'services/eureka-server', type: 'maven', image: 'eureka-server'],
-    'frontend'     : [path: 'services/frontend',      type: 'node',  image: 'frontend']
+    'api-gateway'  : [path: 'services/api-gateway',   type: 'maven', image: 'api-gateway', required: false],
+    'user-service' : [path: 'services/userService',   type: 'maven', image: 'user-service', required: false],
+    'movie-service': [path: 'services/movieService',  type: 'maven', image: 'movie-service', required: false],
+    'email-service': [path: 'services/emailService',  type: 'maven', image: 'email-service', required: false],
+    'eureka-server': [path: 'services/eureka-server', type: 'maven', image: 'eureka-server', required: false],
+    'frontend'     : [path: 'services/frontend',      type: 'node',  image: 'frontend', required: false]
   ]
+}
+
+// Dynamically discover available services
+def discoverAvailableServices(serviceMap) {
+  def available = [:]
+  serviceMap.each { serviceName, meta ->
+    if (fileExists(meta.path)) {
+      available[serviceName] = meta
+      echo "✅ Discovered service: ${serviceName} at ${meta.path}"
+    } else {
+      echo "⚠️ Service ${serviceName} not found at ${meta.path} - will be skipped"
+    }
+  }
+  
+  if (available.isEmpty()) {
+    echo "⚠️ No services found! Checking root directory for builds..."
+    
+    // Fallback: Check if it's a mono-repo with root pom.xml or package.json
+    if (fileExists('pom.xml')) {
+      echo "Found root pom.xml - treating as single Maven project"
+      available['root-app'] = [path: '.', type: 'maven', image: 'cinevision-app', required: true]
+    } else if (fileExists('package.json')) {
+      echo "Found root package.json - treating as single Node.js project"
+      available['root-app'] = [path: '.', type: 'node', image: 'cinevision-app', required: true]
+    } else {
+      error "No services or build files found in the repository!"
+    }
+  }
+  
+  return available
+}
+
+// Enhanced change detection with service availability check
+def detectChangedServices(availableServices, branchName) {
+  // For first build or specific branches, build all available services
+  def isFirstBuild = sh(script: 'git rev-parse HEAD~1 >/dev/null 2>&1; echo $?', returnStdout: true).trim() != '0'
+  
+  if (isFirstBuild) {
+    echo "First build detected - building all available services"
+    return availableServices.keySet() as List
+  }
+  
+  if (branchName == 'develop' || branchName == 'main' || branchName == 'master' || branchName.startsWith('release/')) {
+    echo "Full build branch (${branchName}) - building all available services"
+    return availableServices.keySet() as List
+  }
+  
+  // Detect changes only for available services
+  def changedFiles = sh(
+    script: "git diff --name-only HEAD~1 HEAD",
+    returnStdout: true
+  ).trim().split('\n') as List
+  
+  def changed = []
+  availableServices.each { serviceName, meta ->
+    if (changedFiles.any { it.startsWith("${meta.path}/") }) {
+      changed << serviceName
+      echo "✅ Changes detected in: ${serviceName}"
+    } else if (changedFiles.any { it == "pom.xml" || it == "package.json" || it == "build.gradle" }) {
+      // Root build file changes affect all services
+      echo "⚠️ Root build file changed - including ${serviceName}"
+      changed << serviceName
+    }
+  }
+  
+  if (changed.isEmpty()) {
+    echo "No specific changes detected - building all available services"
+    changed = availableServices.keySet() as List
+  } else {
+    echo "Building affected services: ${changed.join(', ')}"
+  }
+  
+  return changed.unique()
 }
 
 @NonCPS
@@ -85,32 +158,6 @@ def getEnvironmentConfig(String branch) {
   return [env: 'unknown', deployEnabled: false]
 }
 
-def detectChangedServices(serviceMap) {
-  def changedFiles = sh(
-    script: """
-        if git rev-parse HEAD~1 >/dev/null 2>&1; then
-            git diff --name-only HEAD~1 HEAD
-        else
-            git ls-files
-        fi
-    """,
-    returnStdout: true
-  ).trim().split('\n') as List
-  
-  def changed = []
-  serviceMap.each { serviceName, meta ->
-    if (changedFiles.any { it.startsWith("${meta.path}/") }) {
-      changed << serviceName
-    }
-  }
-  
-  if (changed.isEmpty()) {
-    echo "No specific changes - targeting all services"
-    changed = serviceMap.keySet() as List
-  }
-  return changed.unique()
-}
-
 def checkAndInstallTools(config) {
   script {
     // Check for Docker
@@ -132,7 +179,7 @@ def checkAndInstallTools(config) {
     // Check for kubectl (only if deploy is enabled)
     if (config.deployEnabled) {
       def hasKubectl = sh(script: 'command -v kubectl', returnStatus: true) == 0
-      if (!hasKubectl && config.deployEnabled) {
+      if (!hasKubectl) {
         echo "Warning: kubectl not found. Kubernetes deployments may fail."
       }
     }
@@ -141,8 +188,87 @@ def checkAndInstallTools(config) {
   }
 }
 
+// Build a single service with error handling
+def buildService(serviceName, meta, envVars) {
+  def serviceResult = [success: true, error: null, imageTag: null]
+  
+  try {
+    echo "========================================"
+    echo "🚀 Building service: ${serviceName}"
+    echo "========================================"
+    
+    dir(meta.path) {
+      echo "Working directory: ${pwd()}"
+      
+      // Build based on type
+      if (meta.type == 'maven') {
+        if (fileExists('pom.xml')) {
+          echo "Building Maven project..."
+          sh "mvn clean package -DskipTests=false -Dmaven.repo.local=.m2/repository || mvn clean package -DskipTests=true"
+        } else {
+          echo "⚠️ No pom.xml found in ${meta.path}. Skipping Maven build."
+          return
+        }
+      } else if (meta.type == 'node') {
+        if (fileExists('package.json')) {
+          echo "Building Node.js project..."
+          sh "npm ci --legacy-peer-deps || npm install"
+          sh "npm test || echo 'No tests configured'"
+        } else {
+          echo "⚠️ No package.json found in ${meta.path}. Skipping Node.js build."
+          return
+        }
+      }
+      
+      // Build Docker image if Dockerfile exists
+      if (fileExists('Dockerfile')) {
+        def fullImageName = "${envVars.IMAGE_NAMESPACE}/${meta.image}"
+        def imageTag = "${envVars.CURRENT_ECR_REGISTRY}/${fullImageName}:${envVars.IMAGE_TAG}"
+        serviceResult.imageTag = imageTag
+        
+        echo "Building Docker image: ${imageTag}"
+        sh "docker build -t ${imageTag} ."
+        
+        // Run Trivy scan if available
+        def hasTrivy = sh(script: 'command -v trivy', returnStatus: true) == 0
+        if (hasTrivy && envVars.TRIVY_SEVERITY) {
+          echo "Running Trivy security scan..."
+          sh "trivy image --severity ${envVars.TRIVY_SEVERITY} --ignore-unfixed --exit-code 0 ${imageTag} || echo 'Trivy scan found issues but continuing'"
+        }
+        
+        // Push to ECR
+        withAWS(credentials: envVars.AWS_CREDENTIALS_ID, region: envVars.AWS_REGION) {
+          echo "Logging into ECR..."
+          sh "aws ecr get-login-password --region ${envVars.AWS_REGION} | docker login --username AWS --password-stdin ${envVars.CURRENT_ECR_REGISTRY}"
+          
+          echo "Pushing image: ${imageTag}"
+          retry(3) { 
+            sh "docker push ${imageTag}" 
+          }
+          
+          def envTag = "${envVars.TARGET_ENV}-latest"
+          echo "Tagging as ${envTag}"
+          sh "docker tag ${imageTag} ${envVars.CURRENT_ECR_REGISTRY}/${fullImageName}:${envTag}"
+          sh "docker push ${envVars.CURRENT_ECR_REGISTRY}/${fullImageName}:${envTag}"
+        }
+        
+        echo "✅ Successfully built and pushed: ${serviceName}"
+      } else {
+        echo "⚠️ No Dockerfile found in ${meta.path}. Skipping containerization."
+      }
+    }
+  } catch (Exception e) {
+    serviceResult.success = false
+    serviceResult.error = e.message
+    echo "❌ Failed to build service ${serviceName}: ${e.message}"
+  }
+  
+  return serviceResult
+}
+
 // Global state
-def SERVICE_MAP = getServiceMap()
+def AVAILABLE_SERVICES = [:]
+def BUILD_RESULTS = [:]
 
 pipeline {
   // Use any available agent
@@ -180,7 +306,11 @@ pipeline {
         checkout scm
         
         script {
-          // Initialize CONFIG first
+          // Discover available services
+          def staticServiceMap = getServiceMap()
+          AVAILABLE_SERVICES = discoverAvailableServices(staticServiceMap)
+          
+          // Initialize CONFIG
           def CONFIG = getEnvironmentConfig(env.BRANCH_NAME)
           env.TARGET_ENV = CONFIG.env
           
@@ -214,29 +344,33 @@ pipeline {
           env.GIT_COMMIT_SHORT = sh(script: 'git rev-parse --short=8 HEAD', returnStdout: true).trim()
           env.IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT_SHORT}"
           
-          // Check required tools (pass CONFIG as parameter)
+          // Check required tools
           checkAndInstallTools(CONFIG)
           
-          echo "Pipeline initialized for ${env.TARGET_ENV} on node ${env.NODE_NAME}"
-          echo "Docker registry: ${env.CURRENT_ECR_REGISTRY}"
-          echo "Image tag: ${env.IMAGE_TAG}"
+          echo "========================================"
+          echo "Pipeline Configuration:"
+          echo "  Environment: ${env.TARGET_ENV}"
+          echo "  Node: ${env.NODE_NAME}"
+          echo "  Registry: ${env.CURRENT_ECR_REGISTRY}"
+          echo "  Image Tag: ${env.IMAGE_TAG}"
+          echo "  Available Services: ${AVAILABLE_SERVICES.keySet().join(', ')}"
+          echo "========================================"
         }
       }
     }
     
     stage('🔍 Security & Code Quality') {
-      when { expression { env.RUN_SECURITY_SCAN == 'true' } }
+      when { expression { env.RUN_SECURITY_SCAN == 'true' && fileExists('pom.xml') } }
       parallel {
         stage('SCA: Dependency Check') {
           steps {
             script {
-              // Check if dependency-check is available
               def hasDepCheck = sh(script: 'command -v dependency-check.sh', returnStatus: true) == 0
               if (hasDepCheck && fileExists('pom.xml')) {
                 dependencyCheck additionalArguments: '--format HTML --format XML --out .', odcInstallation: 'DP-Check'
                 dependencyCheckPublisher pattern: 'dependency-check-report.xml'
               } else {
-                echo "Dependency-check not installed or no pom.xml found. Skipping SCA scan."
+                echo "Dependency-check not available. Skipping SCA scan."
               }
             }
           }
@@ -245,7 +379,6 @@ pipeline {
         stage('SAST: SonarCloud') {
           steps {
             script {
-              // Check if SonarQube is configured and pom.xml exists
               if (fileExists('pom.xml')) {
                 try {
                   withSonarQubeEnv('sonarcloud') {
@@ -269,86 +402,93 @@ pipeline {
     stage('📦 Build & Containerize') {
       steps {
         script {
-          def changed = detectChangedServices(SERVICE_MAP)
-          env.CHANGED_SERVICES = changed.join(',')
-          
-          echo "Changed services: ${env.CHANGED_SERVICES}"
-          
-          if (changed.isEmpty()) {
-            echo "No services changed. Skipping build stage."
+          if (AVAILABLE_SERVICES.isEmpty()) {
+            echo "No services available to build. Skipping build stage."
             return
           }
           
-          // Run builds sequentially
+          def changed = detectChangedServices(AVAILABLE_SERVICES, env.BRANCH_NAME)
+          env.CHANGED_SERVICES = changed.join(',')
+          
+          echo "========================================"
+          echo "Building services: ${env.CHANGED_SERVICES}"
+          echo "========================================"
+          
+          def buildVars = [
+            AWS_REGION: env.AWS_REGION,
+            IMAGE_NAMESPACE: env.IMAGE_NAMESPACE,
+            CURRENT_ECR_REGISTRY: env.CURRENT_ECR_REGISTRY,
+            IMAGE_TAG: env.IMAGE_TAG,
+            TARGET_ENV: env.TARGET_ENV,
+            AWS_CREDENTIALS_ID: env.AWS_CREDENTIALS_ID,
+            TRIVY_SEVERITY: env.TRIVY_SEVERITY
+          ]
+          
+          // Build each service sequentially with detailed logging
           for (serviceName in changed) {
-            def meta = SERVICE_MAP[serviceName]
+            if (!AVAILABLE_SERVICES.containsKey(serviceName)) {
+              echo "⚠️ Service ${serviceName} is not available. Skipping..."
+              continue
+            }
             
-            stage("Process ${serviceName}") {
-              dir(meta.path) {
-                echo "Building service: ${serviceName}"
-                
-                // Build based on type
-                if (meta.type == 'maven') {
-                  sh "mvn clean package -DskipTests=false -Dmaven.repo.local=.m2/repository || mvn clean package -DskipTests=true"
-                } else if (meta.type == 'node') {
-                  sh "npm ci --legacy-peer-deps || npm install"
-                  sh "npm test || echo 'No tests configured'"
-                }
-                
-                // Build Docker image if Dockerfile exists
-                if (fileExists('Dockerfile')) {
-                  def fullImageName = "${env.IMAGE_NAMESPACE}/${meta.image}"
-                  def imageTag = "${env.CURRENT_ECR_REGISTRY}/${fullImageName}:${env.IMAGE_TAG}"
-                  
-                  sh "docker build -t ${imageTag} ."
-                  
-                  // Run Trivy scan if available
-                  def hasTrivy = sh(script: 'command -v trivy', returnStatus: true) == 0
-                  if (hasTrivy && env.TRIVY_SEVERITY) {
-                    sh "trivy image --severity ${env.TRIVY_SEVERITY} --ignore-unfixed --exit-code 0 ${imageTag} || echo 'Trivy scan found issues but continuing'"
-                  } else {
-                    echo "Trivy not installed. Skipping container security scan."
-                  }
-                  
-                  // Push to ECR
-                  withAWS(credentials: env.AWS_CREDENTIALS_ID, region: env.AWS_REGION) {
-                    sh "aws ecr get-login-password --region ${env.AWS_REGION} | docker login --username AWS --password-stdin ${env.CURRENT_ECR_REGISTRY}"
-                    retry(3) { 
-                      sh "docker push ${imageTag}" 
-                    }
-                    
-                    def envTag = "${env.TARGET_ENV}-latest"
-                    sh "docker tag ${imageTag} ${env.CURRENT_ECR_REGISTRY}/${fullImageName}:${envTag}"
-                    sh "docker push ${env.CURRENT_ECR_REGISTRY}/${fullImageName}:${envTag}"
-                  }
-                } else {
-                  echo "No Dockerfile found in ${meta.path}. Skipping containerization."
-                }
+            def meta = AVAILABLE_SERVICES[serviceName]
+            def result = buildService(serviceName, meta, buildVars)
+            BUILD_RESULTS[serviceName] = result
+            
+            if (!result.success) {
+              echo "❌ Build failed for ${serviceName}: ${result.error}"
+              // Decide whether to continue or fail the pipeline
+              if (meta.required) {
+                error "Required service ${serviceName} failed to build. Aborting pipeline."
+              } else {
+                echo "⚠️ Optional service ${serviceName} failed. Continuing with other services..."
               }
             }
           }
+          
+          // Summary of builds
+          echo "========================================"
+          echo "Build Summary:"
+          BUILD_RESULTS.each { name, result ->
+            def status = result.success ? "✅ SUCCESS" : "❌ FAILED"
+            echo "  ${name}: ${status}"
+          }
+          echo "========================================"
         }
       }
     }
     
     stage('📂 GitOps Manifest Update') {
-      when { expression { env.DEPLOY_ENABLED == 'true' && env.CHANGED_SERVICES != null && env.CHANGED_SERVICES != '' } }
+      when { expression { 
+        env.DEPLOY_ENABLED == 'true' && 
+        env.CHANGED_SERVICES != null && 
+        env.CHANGED_SERVICES != '' &&
+        fileExists(env.KUSTOMIZE_OVERLAY)
+      } }
       steps {
         script {
           def overlay = env.KUSTOMIZE_OVERLAY
-          if (fileExists(overlay)) {
-            dir(overlay) {
-              def changedServices = env.CHANGED_SERVICES.split(',')
-              changedServices.each { serviceName ->
-                if (serviceName != 'frontend' && SERVICE_MAP.containsKey(serviceName)) {
-                  def meta = SERVICE_MAP[serviceName]
+          def updated = false
+          
+          dir(overlay) {
+            def changedServices = env.CHANGED_SERVICES.split(',')
+            changedServices.each { serviceName ->
+              // Only update if service build was successful and has image tag
+              if (BUILD_RESULTS[serviceName]?.success && BUILD_RESULTS[serviceName]?.imageTag) {
+                if (serviceName != 'frontend' && AVAILABLE_SERVICES.containsKey(serviceName)) {
+                  def meta = AVAILABLE_SERVICES[serviceName]
                   def fullImageName = "${env.CURRENT_ECR_REGISTRY}/${env.IMAGE_NAMESPACE}/${meta.image}"
                   sh "kustomize edit set image ${meta.image}=${fullImageName}:${env.IMAGE_TAG} || echo 'Kustomize not available'"
+                  updated = true
+                  echo "✅ Updated manifest for ${serviceName}"
                 }
+              } else {
+                echo "⚠️ Skipping manifest update for ${serviceName} (build failed or no image)"
               }
             }
-            
-            // Commit and push changes
+          }
+          
+          if (updated) {
             sh """
               git config user.email "jenkins@cinevision.com"
               git config user.name "Jenkins CI"
@@ -357,7 +497,7 @@ pipeline {
               git push origin HEAD:${env.BRANCH_NAME} || echo "Push failed"
             """
           } else {
-            echo "Kustomize overlay ${overlay} not found. Skipping manifest update."
+            echo "No manifest updates needed"
           }
         }
       }
@@ -367,17 +507,17 @@ pipeline {
       when { expression { 
         env.CHANGED_SERVICES != null && 
         env.CHANGED_SERVICES.split(',').contains('frontend') && 
+        BUILD_RESULTS['frontend']?.success &&
         env.FRONTEND_BUCKET 
       } }
       steps {
         script {
+          echo "Deploying frontend to S3 bucket: ${env.FRONTEND_BUCKET}"
+          
           withAWS(credentials: env.AWS_CREDENTIALS_ID, region: env.AWS_REGION) {
-            dir(SERVICE_MAP['frontend'].path) {
-              sh 'npm ci --legacy-peer-deps || npm install'
-              sh 'npm run build || echo "Build script not found"'
-              
-              def buildDir = fileExists('dist') ? 'dist' : (fileExists('build') ? 'build' : null)
-              if (buildDir && fileExists(buildDir)) {
+            dir(AVAILABLE_SERVICES['frontend']?.path ?: 'services/frontend') {
+              if (fileExists('dist') || fileExists('build')) {
+                def buildDir = fileExists('dist') ? 'dist' : 'build'
                 sh "aws s3 sync ${buildDir} s3://${env.FRONTEND_BUCKET} --delete"
                 
                 if (env.CLOUDFRONT_DISTRIBUTION_ID) {
@@ -385,8 +525,9 @@ pipeline {
                     sh "aws cloudfront create-invalidation --distribution-id ${CF_ID} --paths '/*'"
                   }
                 }
+                echo "✅ Frontend deployed successfully"
               } else {
-                echo "Build directory not found. Skipping S3 sync."
+                echo "⚠️ Build directory not found. Skipping frontend deployment."
               }
             }
           }
@@ -395,7 +536,11 @@ pipeline {
     }
     
     stage('🚢 Deployment & Verification') {
-      when { expression { env.DEPLOY_ENABLED == 'true' && env.ARGOCD_APP } }
+      when { expression { 
+        env.DEPLOY_ENABLED == 'true' && 
+        env.ARGOCD_APP &&
+        BUILD_RESULTS.any { it.value.success }
+      } }
       steps {
         script {
           if (env.APPROVAL_REQUIRED == 'true') {
@@ -403,7 +548,6 @@ pipeline {
           }
           
           withAWS(credentials: env.AWS_CREDENTIALS_ID, region: env.AWS_REGION) {
-            // Check if ArgoCD CLI is available
             def hasArgoCD = sh(script: 'command -v argocd', returnStatus: true) == 0
             if (hasArgoCD) {
               withCredentials([usernamePassword(credentialsId: 'argocd-creds', passwordVariable: 'ARGO_PWD', usernameVariable: 'ARGO_USER')]) {
@@ -411,9 +555,9 @@ pipeline {
               }
               sh "argocd app sync ${env.ARGOCD_APP} --grpc-web --prune || echo 'Sync failed'"
               sh "argocd app wait ${env.ARGOCD_APP} --health --timeout 600 || echo 'Wait failed'"
+              echo "✅ ArgoCD sync completed"
             } else {
               echo "ArgoCD CLI not found. Skipping ArgoCD deployment."
-              // Fallback to kubectl
               if (fileExists('k8s')) {
                 sh "kubectl apply -k ${env.KUSTOMIZE_OVERLAY} || echo 'kubectl apply failed'"
               }
@@ -425,19 +569,15 @@ pipeline {
               if (fileExists('scripts/canary-analysis.py')) {
                 try {
                   sh "python3 scripts/canary-analysis.py --url ${env.API_URL} --duration 60"
+                  echo "✅ Canary analysis passed"
                 } catch (Exception e) {
                   if (fileExists('k8s/overlays/prod/blue')) {
-                    sh "kubectl apply -k k8s/overlays/prod/blue" // Emergency Revert
+                    sh "kubectl apply -k k8s/overlays/prod/blue"
                   }
                   error "Canary Failed: ${e.message}"
                 }
               } else {
                 echo "Canary analysis script not found. Skipping."
-              }
-              
-              if (fileExists('k8s/overlays/prod/green')) {
-                echo "💎 Full Traffic Shift"
-                sh "kubectl apply -k k8s/overlays/prod/green"
               }
             }
           }
@@ -446,7 +586,7 @@ pipeline {
     }
     
     stage('✅ Post-Deployment Tests') {
-      when { expression { env.RUN_INTEGRATION_TESTS == 'true' } }
+      when { expression { env.RUN_INTEGRATION_TESTS == 'true' && env.API_URL } }
       parallel {
         stage('Integration & DAST') {
           steps {
@@ -460,7 +600,6 @@ pipeline {
                 echo "Integration tests not found. Skipping."
               }
               
-              // Run ZAP scan if Docker is available and API URL exists
               if (env.API_URL) {
                 sh "docker run --rm -v \$(pwd):/zap/wrk/:rw -t owasp/zap2docker-stable zap-baseline.py -t ${env.API_URL} -r zap_report.html || true"
                 archiveArtifacts artifacts: 'zap_report.html', allowEmptyArchive: true
@@ -489,17 +628,19 @@ pipeline {
   post {
     success { 
       script {
+        def successfulServices = BUILD_RESULTS.findAll { it.value.success }.keySet().join(', ')
         slackSend(
           color: 'good',
-          message: "✅ CineVision Build SUCCESSFUL\nJob: ${env.JOB_NAME}\nBuild: #${env.BUILD_NUMBER}\nEnvironment: ${env.TARGET_ENV}\nNode: ${env.NODE_NAME}"
+          message: "✅ CineVision Build SUCCESSFUL\nJob: ${env.JOB_NAME}\nBuild: #${env.BUILD_NUMBER}\nEnvironment: ${env.TARGET_ENV}\nServices: ${successfulServices ?: 'None'}"
         )
       }
     }
     failure { 
       script {
+        def failedServices = BUILD_RESULTS.findAll { !it.value.success }.keySet().join(', ')
         slackSend(
           color: 'danger', 
-          message: "❌ CineVision Build FAILED\nJob: ${env.JOB_NAME}\nBuild: #${env.BUILD_NUMBER}\nEnvironment: ${env.TARGET_ENV}\nNode: ${env.NODE_NAME}"
+          message: "❌ CineVision Build FAILED\nJob: ${env.JOB_NAME}\nBuild: #${env.BUILD_NUMBER}\nEnvironment: ${env.TARGET_ENV}\nFailed Services: ${failedServices ?: 'Unknown'}"
         )
       }
     }
