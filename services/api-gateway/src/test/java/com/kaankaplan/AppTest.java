@@ -1,5 +1,4 @@
 package com.kaankaplan;
-// hello toda
 
 import org.junit.jupiter.api.Test;
 
