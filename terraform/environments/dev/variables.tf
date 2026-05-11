@@ -79,7 +79,7 @@ variable "acm_certificate_arn" {
   default = "arn:aws:acm:us-east-1:211026994790:certificate/f0236af1-7cde-4b43-a947-32fb5e7c0309"
   validation {
     condition     = !strcontains(var.acm_certificate_arn, "ACCOUNT_ID") && !strcontains(var.acm_certificate_arn, "CERTIFICATE_ID")
-    error_message = "acm_certificate_arn still contains ACCOUNT_ID/CERTIFICATE_ID placeholder."
+    error_message = "acm_certificate_arn still contains  ACCOUNT_ID/CERTIFICATE_ID placeholder."
   }
 }
 variable "node_groups" {
