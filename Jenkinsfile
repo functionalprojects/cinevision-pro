@@ -1,310 +1,333 @@
 // ============================================
-// JENKINS PIPELINE FOR POST-MERGE CI/CD
+// CINEVISION ENTERPRISE CI/CD PIPELINE
+// Industrial-grade automation with DevSecOps
 // ============================================
 
-def serviceMap = [
-  'api-gateway'  : [path: 'api-gateway',   type: 'maven', image: 'api-gateway'],
-  'user-service' : [path: 'userService',   type: 'maven', image: 'user-service'],
-  'movie-service': [path: 'movieService',  type: 'maven', image: 'movie-service'],
-  'email-service': [path: 'emailService',  type: 'maven', image: 'email-service'],
-  'eureka-server': [path: 'eureka-server', type: 'maven', image: 'eureka-server'],
-  'frontend'     : [path: 'frontend',      type: 'node',  image: 'frontend']
-]
+import groovy.json.JsonOutput
 
-def detectChangedServices() {
-  def changedFiles = sh(script: "git diff --name-only HEAD~1 HEAD", returnStdout: true).trim().split('\n') as List
-  def changed = []
-  
-  serviceMap.each { serviceName, meta ->
-    if (changedFiles.any { it.startsWith("${meta.path}/") }) {
-      changed << serviceName
-    }
-  }
-  
-  if (changed.isEmpty() || changedFiles.isEmpty()) {
-    echo "No specific service changes detected - building all services"
-    changed = serviceMap.keySet() as List
-  }
-  
-  return changed.unique()
+// Global Configuration
+def getServiceMap() {
+  return [
+    'api-gateway'  : [path: 'services/api-gateway',   type: 'maven', image: 'api-gateway'],
+    'user-service' : [path: 'services/userService',   type: 'maven', image: 'user-service'],
+    'movie-service': [path: 'services/movieService',  type: 'maven', image: 'movie-service'],
+    'email-service': [path: 'services/emailService',  type: 'maven', image: 'email-service'],
+    'eureka-server': [path: 'services/eureka-server', type: 'maven', image: 'eureka-server'],
+    'frontend'     : [path: 'services/frontend',      type: 'node',  image: 'frontend']
+  ]
 }
 
-def getEnvironmentConfig() {
-  def branch = env.BRANCH_NAME
-  
+@NonCPS
+def getEnvironmentConfig(String branch) {
   if (branch == 'main' || branch == 'master' || branch.startsWith('hotfix/')) {
     return [
       env: 'prod',
-      awsAccountId: env.PROD_AWS_ACCOUNT_ID,
+      awsAccountIdCredentialsId: 'PROD_AWS_ACCOUNT_ID',
       awsCredentialsId: 'aws-prod-credentials',
-      namespace: 'cinevision-prod',
       argocdApp: 'cinevision-prod-green',
-      frontendBucket: env.PROD_FRONTEND_BUCKET,
-      cloudfrontDistributionId: env.PROD_CLOUDFRONT_DISTRIBUTION_ID,
-      posterBucket: env.PROD_MOVIE_POSTERS_BUCKET,
-      posterCloudfrontId: env.PROD_POSTER_CLOUDFRONT_ID,
-      archiveBucket: env.PROD_EMAIL_ARCHIVES_BUCKET,
-      archiveCloudfrontId: env.PROD_ARCHIVE_CLOUDFRONT_ID,
-      apiUrl: env.PROD_API_URL,
-      kustomizeOverlay: env.PROD_GREEN_OVERLAY,
+      frontendBucket: 'prod-cinevision-prod-frontend',
+      cloudfrontDistributionId: 'PROD_CLOUDFRONT_DISTRIBUTION_ID',
+      posterCloudfrontId: 'PROD_POSTER_CLOUDFRONT_ID',
+      archiveCloudfrontId: 'PROD_ARCHIVE_CLOUDFRONT_ID',
+      apiUrl: 'https://api.cinevision.com',
+      kustomizeOverlay: 'k8s/overlays/prod/green',
       deployEnabled: true,
       approvalRequired: true,
+      runSecurityScan: true,
       runPerformanceTests: true,
       runIntegrationTests: true,
-      buildImages: true
+      trivySeverity: 'HIGH,CRITICAL'
     ]
   }
   
   if (branch.startsWith('release/')) {
     return [
       env: 'staging',
-      awsAccountId: env.STAGING_AWS_ACCOUNT_ID,
+      awsAccountIdCredentialsId: 'STAGING_AWS_ACCOUNT_ID',
       awsCredentialsId: 'aws-staging-credentials',
-      namespace: 'cinevision-staging',
       argocdApp: 'cinevision-staging',
-      frontendBucket: env.STAGING_FRONTEND_BUCKET,
-      cloudfrontDistributionId: env.STAGING_CLOUDFRONT_DISTRIBUTION_ID,
-      posterBucket: env.STAGING_MOVIE_POSTERS_BUCKET,
-      posterCloudfrontId: env.STAGING_POSTER_CLOUDFRONT_ID,
-      archiveBucket: env.STAGING_EMAIL_ARCHIVES_BUCKET,
-      archiveCloudfrontId: env.STAGING_ARCHIVE_CLOUDFRONT_ID,
-      apiUrl: env.STAGING_API_URL,
-      kustomizeOverlay: env.STAGING_OVERLAY,
+      frontendBucket: 'staging-cinevision-staging-frontend',
+      cloudfrontDistributionId: 'STAGING_CLOUDFRONT_DISTRIBUTION_ID',
+      posterCloudfrontId: 'STAGING_POSTER_CLOUDFRONT_ID',
+      archiveCloudfrontId: 'STAGING_ARCHIVE_CLOUDFRONT_ID',
+      apiUrl: 'https://staging-api.cinevision.com',
+      kustomizeOverlay: 'k8s/overlays/staging',
       deployEnabled: true,
       approvalRequired: true,
+      runSecurityScan: true,
       runPerformanceTests: true,
       runIntegrationTests: true,
-      buildImages: true
+      trivySeverity: 'HIGH,CRITICAL'
     ]
   }
   
   if (branch == 'develop') {
     return [
       env: 'dev',
-      awsAccountId: env.DEV_AWS_ACCOUNT_ID,
+      awsAccountIdCredentialsId: 'DEV_AWS_ACCOUNT_ID',
       awsCredentialsId: 'ecr-eks',
-      namespace: 'cinevision-dev',
       argocdApp: 'cinevision-dev',
-      frontendBucket: env.DEV_FRONTEND_BUCKET,
-      cloudfrontDistributionId: env.DEV_CLOUDFRONT_DISTRIBUTION_ID,
-      posterBucket: env.DEV_MOVIE_POSTERS_BUCKET,
-      posterCloudfrontId: env.DEV_POSTER_CLOUDFRONT_ID,
-      archiveBucket: env.DEV_EMAIL_ARCHIVES_BUCKET,
-      archiveCloudfrontId: env.DEV_ARCHIVE_CLOUDFRONT_ID,
-      apiUrl: env.DEV_API_URL,
-      kustomizeOverlay: env.DEV_OVERLAY,
+      frontendBucket: 'dev-cinevision-dev-frontend',
+      cloudfrontDistributionId: 'DEV_CLOUDFRONT_DISTRIBUTION_ID',
+      posterCloudfrontId: 'DEV_POSTER_CLOUDFRONT_ID',
+      archiveCloudfrontId: 'DEV_ARCHIVE_CLOUDFRONT_ID',
+      apiUrl: 'https://dev-api.cinevisionca.link',
+      kustomizeOverlay: 'k8s/overlays/dev',
       deployEnabled: true,
       approvalRequired: false,
+      runSecurityScan: true,
       runPerformanceTests: false,
       runIntegrationTests: true,
-      buildImages: true
+      trivySeverity: 'CRITICAL'
     ]
   }
   
-  return [
-    env: 'unknown',
-    deployEnabled: false,
-    approvalRequired: false,
-    runPerformanceTests: false,
-    runIntegrationTests: false,
-    buildImages: false
-  ]
+  return [env: 'unknown', deployEnabled: false]
 }
 
+def detectChangedServices(serviceMap) {
+  def changedFiles = sh(
+    script: """
+        if git rev-parse HEAD~1 >/dev/null 2>&1; then
+            git diff --name-only HEAD~1 HEAD
+        else
+            git ls-files
+        fi
+    """,
+    returnStdout: true
+  ).trim().split('\n') as List
+  
+  def changed = []
+  serviceMap.each { serviceName, meta ->
+    if (changedFiles.any { it.startsWith("${meta.path}/") }) {
+      changed << serviceName
+    }
+  }
+  
+  if (changed.isEmpty()) {
+    echo "No specific changes - targeting all services"
+    changed = serviceMap.keySet() as List
+  }
+  return changed.unique()
+}
+
+// Global state (Non-serialized)
+def CONFIG = [:]
+def SERVICE_MAP = getServiceMap()
+
 pipeline {
-  agent any
+  agent { label 'devsecops' } // Required industrial practice
   
   options {
     timestamps()
     disableConcurrentBuilds()
+    ansiColor('xterm')
     buildDiscarder(logRotator(numToKeepStr: '30'))
-    timeout(time: 60, unit: 'MINUTES')
+    timeout(time: 90, unit: 'MINUTES')
   }
   
   environment {
     AWS_REGION = 'us-east-1'
-    DR_AWS_REGION = 'us-west-2'
-    
-    DEV_AWS_ACCOUNT_ID     = credentials('DEV_AWS_ACCOUNT_ID')
-    STAGING_AWS_ACCOUNT_ID = credentials('STAGING_AWS_ACCOUNT_ID')
-    PROD_AWS_ACCOUNT_ID    = credentials('PROD_AWS_ACCOUNT_ID')
-    
     IMAGE_NAMESPACE = 'cinevision'
-    
-    DEV_OVERLAY        = 'k8s/overlays/dev'
-    STAGING_OVERLAY    = 'k8s/overlays/staging'
-    PROD_BLUE_OVERLAY  = 'k8s/overlays/prod/blue'
-    PROD_GREEN_OVERLAY = 'k8s/overlays/prod/green'
-    
-    DEV_API_URL      = 'https://dev-api.cinevisionca.link'
-    STAGING_API_URL  = 'https://staging-api.cinevision.com'
-    PROD_API_URL     = 'https://api.cinevision.com'
-    
-    TRIVY_SEVERITY = 'HIGH,CRITICAL'
-    
-    DEV_FRONTEND_BUCKET      = 'dev-cinevision-dev-frontend'
-    STAGING_FRONTEND_BUCKET  = 'staging-cinevision-staging-frontend'
-    PROD_FRONTEND_BUCKET     = 'prod-cinevision-prod-frontend'
-    
-    DEV_MOVIE_POSTERS_BUCKET      = 'dev-cinevision-dev-movie-posters'
-    STAGING_MOVIE_POSTERS_BUCKET  = 'staging-cinevision-staging-movie-posters'
-    PROD_MOVIE_POSTERS_BUCKET     = 'prod-cinevision-prod-movie-posters'
-    
-    DEV_EMAIL_ARCHIVES_BUCKET     = 'dev-cinevision-dev-email-archives'
-    STAGING_EMAIL_ARCHIVES_BUCKET = 'staging-cinevision-staging-email-archives'
-    PROD_EMAIL_ARCHIVES_BUCKET    = 'prod-cinevision-prod-email-archives'
-    
-    DEV_CLOUDFRONT_DISTRIBUTION_ID      = credentials('DEV_CLOUDFRONT_DISTRIBUTION_ID')
-    DEV_POSTER_CLOUDFRONT_ID           = credentials('DEV_POSTER_CLOUDFRONT_ID')
-    DEV_ARCHIVE_CLOUDFRONT_ID          = credentials('DEV_ARCHIVE_CLOUDFRONT_ID')
-    
-    STAGING_CLOUDFRONT_DISTRIBUTION_ID  = credentials('STAGING_CLOUDFRONT_DISTRIBUTION_ID')
-    STAGING_POSTER_CLOUDFRONT_ID       = credentials('STAGING_POSTER_CLOUDFRONT_ID')
-    STAGING_ARCHIVE_CLOUDFRONT_ID      = credentials('STAGING_ARCHIVE_CLOUDFRONT_ID')
-    
-    PROD_CLOUDFRONT_DISTRIBUTION_ID     = credentials('PROD_CLOUDFRONT_DISTRIBUTION_ID')
-    PROD_POSTER_CLOUDFRONT_ID          = credentials('PROD_POSTER_CLOUDFRONT_ID')
-    PROD_ARCHIVE_CLOUDFRONT_ID         = credentials('PROD_ARCHIVE_CLOUDFRONT_ID')
-    
+    GITHUB_TOKEN = credentials('github-token')
     GITHUB_REPO = 'functionalprojects/cinevision-pro'
   }
   
   stages {
-    stage('Initialize') {
+    stage('🚀 Initialization') {
+      when { 
+        not { changelog '\\[CI\\]' } 
+        anyOf {
+          branch 'develop'
+          branch 'main'
+          expression { env.BRANCH_NAME.startsWith('release/') }
+        }
+      }
       steps {
         script {
-          env.CONFIG = getEnvironmentConfig()
-          env.TARGET_ENV = env.CONFIG.env
+          CONFIG = getEnvironmentConfig(env.BRANCH_NAME)
+          env.TARGET_ENV = CONFIG.env
           
-          env.CURRENT_ECR_REGISTRY = "${env.CONFIG.awsAccountId}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
-          env.CURRENT_API_URL = env.CONFIG.apiUrl
-          env.CURRENT_FRONTEND_BUCKET = env.CONFIG.frontendBucket ?: ''
-          env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID = env.CONFIG.cloudfrontDistributionId ?: ''
-          
-          env.CURRENT_POSTER_BUCKET = env.CONFIG.posterBucket ?: ''
-          env.CURRENT_POSTER_CLOUDFRONT_ID = env.CONFIG.posterCloudfrontId ?: ''
-          
-          env.CURRENT_ARCHIVE_BUCKET = env.CONFIG.archiveBucket ?: ''
-          env.CURRENT_ARCHIVE_CLOUDFRONT_ID = env.CONFIG.archiveCloudfrontId ?: ''
-          
-          env.DEPLOY_ENABLED = env.CONFIG.deployEnabled.toString()
-          env.BUILD_IMAGES = env.CONFIG.buildImages.toString()
-          
-          // Critical validation
-          if (env.TARGET_ENV == 'dev') {
-            def cloudfrontId = env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID
-            if (!cloudfrontId || cloudfrontId.trim() == '' || cloudfrontId == '****') {
-              error("DEV_CLOUDFRONT_DISTRIBUTION_ID is not properly configured in Jenkins credentials")
-            }
-            echo "CloudFront Distribution ID found: ${cloudfrontId}"
+          if (env.TARGET_ENV == 'unknown') {
+            error "Branch ${env.BRANCH_NAME} is not mapped to any environment."
           }
           
-          echo """
-            ========================================
-            JENKINS CI/CD PIPELINE
-            ========================================
-            Branch: ${env.BRANCH_NAME}
-            Environment: ${env.TARGET_ENV}
-            Deploy Enabled: ${env.DEPLOY_ENABLED}
-            Build Images: ${env.BUILD_IMAGES}
-            ========================================
+          withCredentials([string(credentialsId: CONFIG.awsAccountIdCredentialsId, variable: 'AWS_ACCOUNT_ID')]) {
+            env.CURRENT_ECR_REGISTRY = "${AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
+          }
+          
+          env.GIT_COMMIT_SHORT = sh(script: 'git rev-parse --short=8 HEAD', returnStdout: true).trim()
+          env.IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT_SHORT}"
+          
+          echo "Pipeline initialized for ${env.TARGET_ENV}"
+        }
+      }
+    }
+    
+    stage('🔍 Security & Code Quality') {
+      parallel {
+        stage('SCA: Dependency Check') {
+          steps {
+            dependencyCheck additionalArguments: '--format HTML --format XML --out .', odcInstallation: 'DP-Check'
+            dependencyCheckPublisher pattern: 'dependency-check-report.xml'
+          }
+        }
+        
+        stage('SAST: SonarCloud') {
+          steps {
+            withSonarQubeEnv('sonarcloud') {
+              sh 'mvn sonar:sonar'
+            }
+            timeout(time: 15, unit: 'MINUTES') {
+              waitForQualityGate abortPipeline: true
+            }
+          }
+        }
+      }
+    }
+    
+    stage('📦 Build & Containerize') {
+      steps {
+        script {
+          def changed = detectChangedServices(SERVICE_MAP)
+          env.CHANGED_SERVICES = changed.join(',')
+          
+          def branches = [:]
+          changed.each { serviceName ->
+            def meta = SERVICE_MAP[serviceName]
+            branches[serviceName] = {
+              node('devsecops') { // Independent node for true parallelism
+                stage("Process ${serviceName}") {
+                  dir(meta.path) {
+                    checkout scm
+                    
+                    // Build
+                    if (meta.type == 'maven') {
+                      sh "mvn clean package -DskipTests=false -Dmaven.repo.local=.m2/repository"
+                    } else {
+                      sh "npm ci && npm test"
+                    }
+                    
+                    // Docker
+                    def fullImageName = "${env.IMAGE_NAMESPACE}/${meta.image}"
+                    def imageTag = "${env.CURRENT_ECR_REGISTRY}/${fullImageName}:${env.IMAGE_TAG}"
+                    
+                    sh "docker build -t ${imageTag} ."
+                    sh "trivy image --severity ${CONFIG.trivySeverity} --ignore-unfixed --exit-code 1 ${imageTag}"
+                    
+                    withAWS(credentials: CONFIG.awsCredentialsId, region: env.AWS_REGION) {
+                      sh "aws ecr get-login-password --region ${env.AWS_REGION} | docker login --username AWS --password-stdin ${env.CURRENT_ECR_REGISTRY}"
+                      retry(3) { sh "docker push ${imageTag}" }
+                      
+                      def envTag = "${env.TARGET_ENV}-latest"
+                      sh "docker tag ${imageTag} ${env.CURRENT_ECR_REGISTRY}/${fullImageName}:${envTag}"
+                      sh "docker push ${env.CURRENT_ECR_REGISTRY}/${fullImageName}:${envTag}"
+                    }
+                  }
+                }
+              }
+            }
+          }
+          parallel branches
+        }
+      }
+    }
+    
+    stage('📂 GitOps Manifest Update') {
+      when { expression { CONFIG.deployEnabled } }
+      steps {
+        script {
+          def overlay = CONFIG.kustomizeOverlay
+          dir(overlay) {
+            env.CHANGED_SERVICES.split(',').each { serviceName ->
+              if (serviceName != 'frontend') {
+                def meta = SERVICE_MAP[serviceName]
+                def fullImageName = "${env.CURRENT_ECR_REGISTRY}/${env.IMAGE_NAMESPACE}/${meta.image}"
+                sh "kustomize edit set image ${meta.image}=${fullImageName}:${env.IMAGE_TAG}"
+              }
+            }
+          }
+          
+          sh """
+            git config user.email "jenkins@cinevision.com"
+            git config user.name "Jenkins CI"
+            git remote set-url origin https://${GITHUB_TOKEN}@github.com/${env.GITHUB_REPO}.git
+            git add ${overlay}
+            git commit -m "[CI] Deploy ${env.IMAGE_TAG} to ${env.TARGET_ENV} [skip ci]" || echo "No changes"
+            git push origin HEAD:${env.BRANCH_NAME}
           """
         }
       }
     }
     
-    stage('Checkout') {
-      steps {
-        checkout scm
-        script {
-          env.GIT_COMMIT_SHORT = sh(script: 'git rev-parse --short=8 HEAD', returnStdout: true).trim()
-          env.IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT_SHORT}"
-          env.GIT_COMMIT = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
-        }
-      }
-    }
-    
-    stage('Detect Changed Services') {
-      when {
-        expression { env.BUILD_IMAGES == 'true' }
-      }
+    stage('🌐 Frontend Deployment') {
+      when { expression { env.CHANGED_SERVICES.split(',').contains('frontend') } }
       steps {
         script {
-          def changed = detectChangedServices()
-          env.CHANGED_SERVICES = changed.join(',')
-          echo "Changed services: ${env.CHANGED_SERVICES}"
-        }
-      }
-    }
-    
-    stage('Authenticate to AWS') {
-      when {
-        expression { env.BUILD_IMAGES == 'true' && env.CONFIG.awsCredentialsId }
-      }
-      steps {
-        script {
-          withAWS(credentials: env.CONFIG.awsCredentialsId, region: env.AWS_REGION) {
-            sh """
-              aws ecr get-login-password --region ${env.AWS_REGION} \
-                | docker login --username AWS --password-stdin ${env.CURRENT_ECR_REGISTRY}
-            """
+          withAWS(credentials: CONFIG.awsCredentialsId, region: env.AWS_REGION) {
+            dir(SERVICE_MAP['frontend'].path) {
+              sh 'npm ci && npm run build'
+              def buildDir = 'dist' // Configurable for Vite
+              sh "aws s3 sync ${buildDir} s3://${CONFIG.frontendBucket} --delete"
+              
+              withCredentials([string(credentialsId: CONFIG.cloudfrontDistributionId, variable: 'CF_ID')]) {
+                sh "aws cloudfront create-invalidation --distribution-id ${CF_ID} --paths '/*'"
+              }
+            }
           }
         }
       }
     }
     
-    stage('Build and Push Docker Images') {
-      when {
-        expression { env.BUILD_IMAGES == 'true' && env.CHANGED_SERVICES }
-      }
+    stage('🚢 Deployment & Verification') {
+      when { expression { CONFIG.deployEnabled } }
       steps {
         script {
-          def services = env.CHANGED_SERVICES.split(',')
+          if (CONFIG.approvalRequired) {
+            input message: "Approve deployment to ${env.TARGET_ENV}?", ok: "Deploy"
+          }
           
-          services.each { serviceName ->
-            def meta = serviceMap[serviceName]
-            def fullImageName = "${env.IMAGE_NAMESPACE}/${meta.image}"
-            def imageTag = "${env.CURRENT_ECR_REGISTRY}/${fullImageName}:${env.IMAGE_TAG}"
+          withAWS(credentials: CONFIG.awsCredentialsId, region: env.AWS_REGION) {
+            // ArgoCD Auth & Sync
+            withCredentials([usernamePassword(credentialsId: 'argocd-creds', passwordVariable: 'ARGO_PWD', usernameVariable: 'ARGO_USER')]) {
+              sh "argocd login argocd.cinevision.com --username ${ARGO_USER} --password ${ARGO_PWD} --insecure"
+            }
+            sh "argocd app sync ${CONFIG.argocdApp} --grpc-web --prune"
+            sh "argocd app wait ${CONFIG.argocdApp} --health --timeout 600"
             
-            echo "Building ${serviceName}"
-            
-            dir(meta.path) {
-              sh "docker build -t ${imageTag} ."
-              sh "trivy image --severity ${env.TRIVY_SEVERITY} --exit-code 1 ${imageTag}"
-              sh "docker push ${imageTag}"
+            // Canary & Blue-Green (Prod only)
+            if (env.TARGET_ENV == 'prod') {
+              echo "🚥 Starting Canary Analysis"
+              try {
+                sh "python3 scripts/canary-analysis.py --url ${CONFIG.apiUrl} --duration 60"
+              } catch (Exception e) {
+                sh "kubectl apply -k k8s/overlays/prod/blue" // Emergency Revert
+                error "Canary Failed: ${e.message}"
+              }
+              
+              echo "💎 Full Traffic Shift"
+              sh "kubectl apply -k k8s/overlays/prod/green"
             }
           }
         }
       }
     }
     
-    stage('Frontend Deployment') {
-      when {
-        expression {
-          env.DEPLOY_ENABLED == 'true' &&
-          env.CHANGED_SERVICES?.split(',')?.contains('frontend') &&
-          env.CURRENT_FRONTEND_BUCKET
-        }
-      }
-      steps {
-        script {
-          withAWS(credentials: env.CONFIG.awsCredentialsId, region: env.AWS_REGION) {
-            dir('frontend') {
-              sh 'npm ci'
-              sh 'npm run build'
-              sh "aws s3 sync dist s3://${env.CURRENT_FRONTEND_BUCKET} --delete"
-              
-              if (env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID && env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID != '****' && env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID != '') {
-                sh "aws cloudfront create-invalidation --distribution-id ${env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID} --paths '/*'"
-              }
-              
-              if (env.CHANGED_SERVICES?.split(',')?.contains('movieService') && env.CURRENT_POSTER_CLOUDFRONT_ID && env.CURRENT_POSTER_CLOUDFRONT_ID != '****' && env.CURRENT_POSTER_CLOUDFRONT_ID != '') {
-                sh "aws cloudfront create-invalidation --distribution-id ${env.CURRENT_POSTER_CLOUDFRONT_ID} --paths '/*'"
-              }
-              if (env.CHANGED_SERVICES?.split(',')?.contains('emailService') && env.CURRENT_ARCHIVE_CLOUDFRONT_ID && env.CURRENT_ARCHIVE_CLOUDFRONT_ID != '****' && env.CURRENT_ARCHIVE_CLOUDFRONT_ID != '') {
-                sh "aws cloudfront create-invalidation --distribution-id ${env.CURRENT_ARCHIVE_CLOUDFRONT_ID} --paths '/*'"
-              }
+    stage('✅ Post-Deployment Tests') {
+      parallel {
+        stage('Integration & DAST') {
+          steps {
+            script {
+              dir('tests/integration') { sh "npm install && BASE_URL=${CONFIG.apiUrl} npm test" }
+              sh "docker run --rm -v \$(pwd):/zap/wrk/:rw -t owasp/zap2docker-stable zap-baseline.py -t ${CONFIG.apiUrl} -r zap_report.html || true"
+              archiveArtifacts artifacts: 'zap_report.html', allowEmptyArchive: true
             }
+          }
+        }
+        stage('Performance') {
+          when { expression { CONFIG.runPerformanceTests } }
+          steps {
+            dir('tests/performance') { sh "docker run --rm -v \$(pwd):/tests -t grafana/k6 run /tests/cinevision-load-test.js -e BASE_URL=${CONFIG.apiUrl}" }
           }
         }
       }
@@ -312,46 +335,32 @@ pipeline {
   }
   
   post {
-    always {
-      // Post-actions now run WITHIN the node context
-      script {
-        echo "=== POST-BUILD CLEANUP ==="
-        try {
-          cleanWs(
-            cleanWhenNotBuilt: false,
-            deleteDirs: true,
-            disableDeferredWipeout: false
-          )
-          echo "Workspace cleaned successfully"
-        } catch (Exception e) {
-          echo "Cleanup warning: ${e.message}"
-        }
-      }
-    }
-    
-    success {
-      script {
-        echo """
-          ✅ SUCCESS: ${env.BRANCH_NAME} -> ${env.TARGET_ENV}
-          Build: ${env.BUILD_URL}
-        """
-      }
-    }
-    
-    failure {
-      script {
-        echo """
-          ❌ FAILED: ${env.BRANCH_NAME} -> ${env.TARGET_ENV}
-          Build: ${env.BUILD_URL}
-        """
-        
-        // Optional: Archive artifacts only if they exist
-        try {
-          archiveArtifacts artifacts: '**/target/surefire-reports/*.xml', allowEmptyArchive: true
-        } catch (Exception e) {
-          echo "No artifacts to archive"
-        }
-      }
+    success { sendSlackNotification('SUCCESSFUL') }
+    failure { sendSlackNotification('FAILED') }
+    always { 
+      junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml, **/test-results/**/*.xml'
+      cleanWs() 
     }
   }
+}
+
+// ============================================
+// Helper Functions
+// ============================================
+
+def sendSlackNotification(String buildStatus) {
+    def colorCode = buildStatus == 'SUCCESSFUL' ? 'good' : (buildStatus == 'FAILED' ? 'danger' : 'warning')
+    def emoji = buildStatus == 'SUCCESSFUL' ? '✅' : '❌'
+    
+    slackSend(
+        color: colorCode,
+        message: """
+${emoji} *CineVision Build ${buildStatus}*
+*Job:* ${env.JOB_NAME}
+*Build:* <${env.BUILD_URL}|#${env.BUILD_NUMBER}>
+*Environment:* ${env.TARGET_ENV}
+*Commit:* <https://github.com/${env.GITHUB_REPO}/commit/${env.GIT_COMMIT}|${env.GIT_COMMIT_SHORT}>
+*Services:* ${env.CHANGED_SERVICES}
+        """.trim()
+    )
 }
