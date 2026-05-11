@@ -50,6 +50,7 @@ def canRunMavenBuild() {
     def hasValidPom = fileExists('pom.xml')
     if (!hasValidPom) return false
     
+    // Check if we're in a service directory with its own pom.xml
     def isStandaloneService = fileExists('pom.xml') && !fileExists('../pom.xml')
     
     if (isStandaloneService) {
@@ -57,7 +58,8 @@ def canRunMavenBuild() {
       return true
     }
     
-    def result = sh(script: 'mvn help:evaluate -Dexpression=project.modules -q -DforceStdout 2>/dev/null | head -1', returnStdout: true).trim()
+    // For root pom, check if modules exist
+    def result = sh(script: 'mvn help:evaluate -Dexpression=project.modules -q -DforceStdout 2>/dev/null | grep -v "NONE" | grep -v "\\[WARNING\\]" | head -1', returnStdout: true).trim()
     def hasValidModules = result != null && result != '' && !result.contains('NONE') && !result.contains('ERROR')
     
     if (!hasValidModules) {
@@ -70,6 +72,82 @@ def canRunMavenBuild() {
     echo "⚠️ Maven validation failed: ${e.message}"
     return false
   }
+}
+
+// Generate SonarQube properties file for a service
+def generateSonarProperties(serviceName, servicePath) {
+  def sonarProps = """
+sonar.projectKey=${serviceName}
+sonar.projectName=${serviceName}
+sonar.projectVersion=1.0
+sonar.organization=functionalprojects-key
+
+# Path to source directories
+sonar.sources=src/main/java
+sonar.tests=src/test/java
+sonar.java.binaries=target/classes
+sonar.java.test.binaries=target/test-classes
+sonar.java.libraries=target/**/*.jar
+
+# Encoding
+sonar.sourceEncoding=UTF-8
+
+# Exclusions
+sonar.exclusions=**/generated/**/*.*,**/test/**/*.*
+"""
+  
+  writeFile file: "${servicePath}/sonar-project.properties", text: sonarProps
+  return "${servicePath}/sonar-project.properties"
+}
+
+// Generate SonarQube properties for root Maven project
+def generateRootSonarProperties(servicePath) {
+  def sonarProps = """
+sonar.projectKey=cinevision-pro
+sonar.projectName=CineVision Pro
+sonar.projectVersion=1.0
+sonar.organization=functionalprojects-key
+
+# Path to source directories
+sonar.sources=.
+sonar.tests=.
+sonar.java.binaries=**/target/classes
+sonar.java.test.binaries=**/target/test-classes
+
+# Encoding
+sonar.sourceEncoding=UTF-8
+
+# Exclusions
+sonar.exclusions=**/generated/**/*.*,**/test/**/*.*,**/node_modules/**/*.*,**/dist/**/*.*
+sonar.coverage.exclusions=**/test/**/*.*,**/generated/**/*.*
+"""
+  
+  writeFile file: "${servicePath}/sonar-project.properties", text: sonarProps
+  return "${servicePath}/sonar-project.properties"
+}
+
+// Generate SonarQube properties for Node.js service
+def generateNodeSonarProperties(serviceName, servicePath) {
+  def sonarProps = """
+sonar.projectKey=${serviceName}
+sonar.projectName=${serviceName}
+sonar.projectVersion=1.0
+sonar.organization=functionalprojects-key
+
+# Path to source directories
+sonar.sources=src
+sonar.tests=src
+sonar.javascript.lcov.reportPaths=coverage/lcov.info
+
+# Encoding
+sonar.sourceEncoding=UTF-8
+
+# Exclusions
+sonar.exclusions=**/node_modules/**/*.*,**/dist/**/*.*,**/build/**/*.*
+"""
+  
+  writeFile file: "${servicePath}/sonar-project.properties", text: sonarProps
+  return "${servicePath}/sonar-project.properties"
 }
 
 // Enhanced change detection with service availability check
@@ -204,9 +282,16 @@ def checkAndInstallTools(config) {
       echo "Warning: AWS CLI not found. Some steps may fail."
     }
     
+    // Check for Dependency Check
     def hasDepCheck = sh(script: 'command -v dependency-check.sh', returnStatus: true) == 0
     if (!hasDepCheck && config.runSecurityScan) {
       echo "Warning: OWASP Dependency Check not found. Install from: https://github.com/jeremylong/DependencyCheck"
+    }
+    
+    // Check for SonarQube scanner
+    def hasSonarScanner = sh(script: 'command -v sonar-scanner', returnStatus: true) == 0
+    if (!hasSonarScanner && config.runSecurityScan) {
+      echo "Warning: SonarQube scanner not found. Will use Maven plugin instead."
     }
     
     if (config.deployEnabled) {
@@ -300,131 +385,9 @@ def buildService(serviceName, meta, envVars) {
   return serviceResult
 }
 
-// Find all pom.xml files without using findFiles
-def findPomFiles() {
-  def pomFiles = []
-  def pomLocations = ['services/api-gateway/pom.xml', 'services/userService/pom.xml', 'services/movieService/pom.xml', 
-                      'services/emailService/pom.xml', 'services/eureka-server/pom.xml', 'pom.xml']
-  
-  pomLocations.each { location ->
-    if (fileExists(location)) {
-      pomFiles.add(location)
-      echo "Found pom.xml at: ${location}"
-    }
-  }
-  
-  return pomFiles
-}
-
-// Enhanced SonarCloud analysis with proper configuration
-def runSonarAnalysis(serviceName, meta) {
-  echo "========================================"
-  echo "🔍 Running SonarCloud analysis for: ${serviceName}"
-  echo "  Organization: functionalprojects"
-  echo "  Organization Key: functionalprojects-key"
-  echo "========================================"
-  
-  def success = false
-  def errorMessage = ""
-  
-  dir(meta.path) {
-    try {
-      // Ensure JaCoCo coverage report is generated
-      if (fileExists('pom.xml')) {
-        sh """
-          mvn clean test jacoco:report \
-            -Dmaven.repo.local=.m2/repository \
-            -DskipTests=false || echo 'Tests or coverage generation failed'
-        """
-      }
-      
-      // Prepare Sonar properties
-      def sonarProperties = """
-        -Dsonar.projectKey=${serviceName}
-        -Dsonar.organization=functionalprojects
-        -Dsonar.host.url=https://sonarcloud.io
-        -Dsonar.projectName=CineVision-${serviceName}
-        -Dsonar.projectVersion=1.0.0
-        -Dsonar.sourceEncoding=UTF-8
-        -Dsonar.java.binaries=target/classes
-        -Dsonar.java.test.binaries=target/test-classes
-        -Dsonar.java.sources=src/main/java
-        -Dsonar.java.tests=src/test/java
-        -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml
-        -Dsonar.junit.reportPaths=target/surefire-reports
-        -Dsonar.sources=src/main
-        -Dsonar.exclusions=**/generated/**/*,**/model/**/*.java
-        -Dsonar.coverage.exclusions=**/config/**/*,**/dto/**/*,**/model/**/*,**/exception/**/*
-      """
-      
-      // Run SonarCloud analysis
-      withCredentials([string(credentialsId: 'sonarcloud-token', variable: 'SONAR_TOKEN')]) {
-        withSonarQubeEnv('sonarcloud') {
-          sh """
-            mvn sonar:sonar ${sonarProperties} \
-              -Dsonar.login=${SONAR_TOKEN} \
-              -Dsonar.verbose=false \
-              -Dmaven.repo.local=.m2/repository
-          """
-        }
-        
-        // Wait for SonarQube analysis to complete
-        timeout(time: 10, unit: 'MINUTES') {
-          def waitForQualityGate = true
-          if (waitForQualityGate) {
-            echo "Waiting for Quality Gate results..."
-            try {
-              sh """
-                timeout 300s bash -c '
-                  while true; do
-                    STATUS=\$(curl -s -u ${SONAR_TOKEN}: "https://sonarcloud.io/api/qualitygates/project_status?projectKey=${serviceName}" | jq -r .projectStatus.status)
-                    if [ "\$STATUS" = "OK" ] || [ "\$STATUS" = "ERROR" ]; then
-                      echo "Quality Gate status: \$STATUS"
-                      if [ "\$STATUS" = "ERROR" ]; then
-                        exit 1
-                      fi
-                      break
-                    fi
-                    echo "Waiting for analysis to complete..."
-                    sleep 10
-                  done
-                '
-              """ || echo "Quality Gate check finished with issues"
-            } catch (Exception e) {
-              echo "Quality Gate check encountered an error: ${e.message}"
-            }
-          }
-        }
-      }
-      
-      success = true
-      echo "✅ SonarCloud analysis completed for ${serviceName}"
-      
-    } catch (Exception e) {
-      errorMessage = e.message
-      echo "❌ SonarCloud analysis failed for ${serviceName}: ${errorMessage}"
-      echo "========================================"
-      echo "Troubleshooting Steps:"
-      echo "1. Verify your SonarCloud token is correct in Jenkins credentials (ID: sonarcloud-token)"
-      echo "2. Ensure the project '${serviceName}' exists in SonarCloud organization 'functionalprojects'"
-      echo "3. Check that you have the SonarQube plugin installed in Jenkins"
-      echo "4. Verify SonarQube server configuration:"
-      echo "   - Name: sonarcloud"
-      echo "   - Server URL: https://sonarcloud.io"
-      echo "   - Token: [your token]"
-      echo "5. Alternative: Project can be auto-created on first scan"
-      echo "6. Check network connectivity to sonarcloud.io"
-      echo "========================================"
-    }
-  }
-  
-  return [success: success, error: errorMessage]
-}
-
 // Global state
 def AVAILABLE_SERVICES = [:]
 def BUILD_RESULTS = [:]
-def SONAR_RESULTS = [:]
 
 pipeline {
   agent any
@@ -444,8 +407,8 @@ pipeline {
     GITHUB_REPO = 'functionalprojects/cinevision-pro'
     JENKINS_AGENT_NAME = "${NODE_NAME}"
     SONAR_HOST_URL = 'https://sonarcloud.io'
-    SONAR_ORG_KEY = 'functionalprojects-key'
-    SONAR_ORG_NAME = 'functionalprojects'
+    SONAR_ORGANIZATION_KEY = 'functionalprojects-key'
+    SONAR_ORGANIZATION_NAME = 'functionalprojects'
   }
   
   stages {
@@ -508,7 +471,9 @@ pipeline {
           echo "  Node: ${env.NODE_NAME}"
           echo "  Registry: ${env.CURRENT_ECR_REGISTRY}"
           echo "  Image Tag: ${env.IMAGE_TAG}"
-          echo "  SonarCloud Organization: ${env.SONAR_ORG_NAME} (Key: ${env.SONAR_ORG_KEY})"
+          echo "  SonarCloud Organization Name: ${env.SONAR_ORGANIZATION_NAME}"
+          echo "  SonarCloud Organization Key: ${env.SONAR_ORGANIZATION_KEY}"
+          echo "  SonarCloud Host: ${env.SONAR_HOST_URL}"
           echo "  Available Services: ${AVAILABLE_SERVICES.keySet().join(', ')}"
           echo "========================================"
         }
@@ -536,11 +501,15 @@ pipeline {
                 return
               }
               
-              def pomFiles = findPomFiles()
+              // Find all pom.xml files to scan
+              def pomFiles = findFiles(glob: '**/pom.xml')
               def scannedCount = 0
               
               for (pomFile in pomFiles) {
-                def serviceDir = pomFile.replace('/pom.xml', '')
+                // Skip if it's in target directory
+                if (pomFile.path.contains('target/')) continue
+                
+                def serviceDir = new File(pomFile.path).getParent()
                 echo "Scanning dependencies for: ${serviceDir}"
                 
                 try {
@@ -551,8 +520,7 @@ pipeline {
                         --format HTML \
                         --format XML \
                         --out ${env.WORKSPACE}/dependency-check-reports \
-                        --failOnError false \
-                        --enableExperimental || true
+                        --enableExperimental || echo 'Dependency check completed with warnings'
                     """
                   }
                   scannedCount++
@@ -562,14 +530,8 @@ pipeline {
               }
               
               if (scannedCount > 0) {
-                publishHTML([
-                  allowMissing: true,
-                  alwaysLinkToLastBuild: true,
-                  keepAll: true,
-                  reportDir: 'dependency-check-reports',
-                  reportFiles: 'dependency-check-report.html',
-                  reportName: 'OWASP Dependency Check Report'
-                ])
+                dependencyCheckPublisher pattern: 'dependency-check-reports/**/dependency-check-report.xml'
+                archiveArtifacts artifacts: 'dependency-check-reports/**/*.html', allowEmptyArchive: true
                 echo "✅ Dependency Check completed for ${scannedCount} projects"
               } else {
                 echo "No pom.xml files found to scan"
@@ -583,60 +545,89 @@ pipeline {
             script {
               echo "========================================"
               echo "🔍 SonarCloud Configuration"
-              echo "  Organization: ${env.SONAR_ORG_NAME}"
-              echo "  Organization Key: ${env.SONAR_ORG_KEY}"
+              echo "  Organization Name: ${env.SONAR_ORGANIZATION_NAME}"
+              echo "  Organization Key: ${env.SONAR_ORGANIZATION_KEY}"
               echo "  Server URL: ${env.SONAR_HOST_URL}"
               echo "========================================"
               
-              // Verify SonarCloud token exists
+              // Check if SonarQube is configured in Jenkins
+              def sonarConfigured = false
               try {
-                withCredentials([string(credentialsId: 'sonarcloud-token', variable: 'TEST_TOKEN')]) {
-                  echo "✅ SonarCloud token 'sonarcloud-token' found in Jenkins credentials"
+                def sonarServer = withSonarQubeEnv('sonarcloud') { 
+                  sonarConfigured = true
+                  echo "✅ SonarQube server 'sonarcloud' found"
                 }
-              } catch (Exception e) {
-                echo "❌ SonarCloud token 'sonarcloud-token' not found in Jenkins credentials!"
-                echo "Please add your SonarCloud token:"
-                echo "1. Go to Jenkins → Manage Jenkins → Credentials → System → Global credentials (unrestricted)"
-                echo "2. Add Credentials → Secret text"
-                echo "3. ID: sonarcloud-token"
-                echo "4. Secret: [your SonarCloud token from https://sonarcloud.io/account/security]"
-                error "SonarCloud token missing. Pipeline cannot proceed with security scan."
+              } catch(Exception e) {
+                echo "⚠️ SonarQube server 'sonarcloud' not configured in Jenkins: ${e.message}"
+                echo "Please configure SonarQube in: Manage Jenkins → Configure System → SonarQube servers"
               }
               
-              // Verify SonarQube server configuration
-              echo "Verifying SonarQube server configuration..."
-              echo "Ensure 'sonarcloud' server is configured in:"
-              echo "  Jenkins → Manage Jenkins → Configure System → SonarQube servers"
-              echo "  Name: sonarcloud"
-              echo "  Server URL: https://sonarcloud.io"
-              echo "  Server authentication token: [select sonarcloud-token]"
+              if (!sonarConfigured) {
+                echo "========================================"
+                echo "⚠️ SonarQube Scanner not configured!"
+                echo "To configure:"
+                echo "1. Install SonarQube Scanner plugin"
+                echo "2. Go to Manage Jenkins → Configure System → SonarQube servers"
+                echo "3. Add server with name 'sonarcloud'"
+                echo "4. Server URL: https://sonarcloud.io"
+                echo "5. Server authentication token: [your token from SonarCloud]"
+                echo "6. Organization Key: ${env.SONAR_ORGANIZATION_KEY}"
+                echo "========================================"
+                echo "Skipping SonarCloud analysis..."
+                return
+              }
               
               def scannedServices = []
               
+              // Run Sonar analysis for each Maven service
               AVAILABLE_SERVICES.each { serviceName, meta ->
                 if (meta.type == 'maven' && fileExists("${meta.path}/pom.xml")) {
-                  def result = runSonarAnalysis(serviceName, meta)
-                  SONAR_RESULTS[serviceName] = result
-                  if (result.success) {
-                    scannedServices.add(serviceName)
+                  echo "========================================"
+                  echo "🔍 Running SonarCloud analysis for: ${serviceName}"
+                  echo "  Organization: ${env.SONAR_ORGANIZATION_NAME}"
+                  echo "  Organization Key: ${env.SONAR_ORGANIZATION_KEY}"
+                  echo "========================================"
+                  
+                  dir(meta.path) {
+                    // Generate sonar-project.properties with correct organization key
+                    generateSonarProperties(serviceName, pwd())
+                    
+                    try {
+                      withSonarQubeEnv('sonarcloud') {
+                        // Run Maven Sonar plugin with organization key
+                        sh """
+                          mvn sonar:sonar \
+                            -Dsonar.projectKey=${serviceName} \
+                            -Dsonar.organization=${env.SONAR_ORGANIZATION_KEY} \
+                            -Dsonar.host.url=${env.SONAR_HOST_URL} \
+                            -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml \
+                            2>&1
+                        """
+                      }
+                      scannedServices.add(serviceName)
+                      echo "✅ SonarCloud analysis completed for ${serviceName}"
+                    } catch(Exception e) {
+                      echo "⚠️ SonarCloud analysis failed for ${serviceName}: ${e.message}"
+                      echo "Continuing with other services..."
+                    }
                   }
                 }
               }
               
               if (scannedServices.isEmpty()) {
                 echo "========================================"
-                echo "⚠️ No Maven services were successfully analyzed"
-                echo "Possible solutions:"
-                echo "1. Ensure each service has a valid pom.xml"
-                echo "2. Add sonar-project.properties file to each service with:"
-                echo "   sonar.projectKey=service-name"
-                echo "   sonar.organization=functionalprojects"
-                echo "   sonar.host.url=https://sonarcloud.io"
-                echo "3. Or rely on the command-line parameters configured in the pipeline"
-                echo "4. Check that the SonarQube Scanner for Maven is available"
+                echo "❌ No services found for SonarCloud analysis"
+                echo "Please verify:"
+                echo "  - Organization Key '${env.SONAR_ORGANIZATION_KEY}' exists on SonarCloud"
+                echo "  - Organization Name '${env.SONAR_ORGANIZATION_NAME}' is correct"
+                echo "  - Jenkins SonarQube server 'sonarcloud' is properly configured"
+                echo "  - SonarCloud token has access to the organization"
                 echo "========================================"
               } else {
+                echo "========================================"
                 echo "✅ SonarCloud analysis completed for: ${scannedServices.join(', ')}"
+                echo "📊 View results at: https://sonarcloud.io/organizations/${env.SONAR_ORGANIZATION_KEY}/projects"
+                echo "========================================"
               }
             }
           }
@@ -811,6 +802,7 @@ pipeline {
                 echo "✅ ArgoCD sync completed"
               } catch (Exception e) {
                 echo "ArgoCD operation failed: ${e.message}"
+                echo "Please ensure credentials 'argocd-creds' are configured in Jenkins"
               }
             } else {
               echo "ArgoCD CLI not found. Skipping ArgoCD deployment."
@@ -838,6 +830,7 @@ pipeline {
                 echo "Integration tests not found. Skipping."
               }
               
+              // Fixed ZAP Docker image
               if (env.API_URL) {
                 sh """
                   docker pull ghcr.io/zaproxy/zaproxy:stable || true
@@ -885,44 +878,30 @@ pipeline {
     success { 
       script {
         def successfulServices = BUILD_RESULTS.findAll { it.value.success }.keySet().join(', ')
-        def successfulSonar = SONAR_RESULTS.findAll { it.value.success }.keySet().join(', ')
-        echo "========================================"
-        echo "✅ Pipeline completed successfully!"
-        echo "  Services built: ${successfulServices ?: 'None'}"
-        echo "  SonarCloud analyzed: ${successfulSonar ?: 'None'}"
-        echo "========================================"
+        echo "Pipeline completed successfully! Services built: ${successfulServices ?: 'None'}"
+        
+        // Send success notification (optional)
+        slackSend(
+          color: 'good',
+          message: "✅ Pipeline SUCCESS for ${env.JOB_NAME} #${env.BUILD_NUMBER}\nEnvironment: ${env.TARGET_ENV}\nServices: ${successfulServices ?: 'None'}"
+        )
       }
     }
     failure { 
       script {
         def failedServices = BUILD_RESULTS.findAll { !it.value.success }.keySet().join(', ')
-        def failedSonar = SONAR_RESULTS.findAll { !it.value.success }.keySet().join(', ')
-        echo "========================================"
-        echo "❌ Pipeline failed!"
-        echo "  Failed services: ${failedServices ?: 'None'}"
-        echo "  Failed SonarCloud analyses: ${failedSonar ?: 'None'}"
-        echo "========================================"
+        echo "Pipeline failed. Failed services: ${failedServices ?: 'Unknown'}"
         
-        // Provide SonarCloud troubleshooting steps on failure
-        if (failedSonar) {
-          echo ""
-          echo "📋 SonarCloud Troubleshooting Steps:"
-          echo "1. Verify your SonarCloud token 'sonarcloud-token' is correctly configured in Jenkins"
-          echo "2. Ensure projects exist in https://sonarcloud.io/organizations/functionalprojects"
-          echo "3. Check that Maven can connect to SonarCloud:"
-          echo "   mvn sonar:sonar -Dsonar.projectKey=test -Dsonar.organization=functionalprojects -Dsonar.host.url=https://sonarcloud.io"
-          echo "4. Verify you have 'sonarcloud' server configured in Jenkins:"
-          echo "   Manage Jenkins → Configure System → SonarQube servers"
-          echo "   Name: sonarcloud"
-          echo "   URL: https://sonarcloud.io"
-          echo "   Token: [select sonarcloud-token]"
-          echo "5. Check if the SonarQube Scanner plugin is installed in Jenkins"
-        }
+        // Send failure notification (optional)
+        slackSend(
+          color: 'danger',
+          message: "❌ Pipeline FAILED for ${env.JOB_NAME} #${env.BUILD_NUMBER}\nEnvironment: ${env.TARGET_ENV}\nFailed services: ${failedServices ?: 'Unknown'}\nCheck logs: ${env.BUILD_URL}"
+        )
       }
     }
     always { 
       script {
-        junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml, **/test-results/**/*.xml'
+        junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml, **/test-results/**/*.xml, dependency-check-reports/**/*.xml'
         cleanWs() 
       }
     }
