@@ -32,16 +32,9 @@ def discoverAvailableServices(serviceMap) {
   if (available.isEmpty()) {
     echo "⚠️ No services found! Checking root directory for builds..."
     
-    // Fallback: Check if it's a mono-repo with root pom.xml or package.json
     if (fileExists('pom.xml')) {
-      // Validate if pom.xml has valid modules or can be built standalone
-      def pomContent = readFile('pom.xml')
-      if (pomContent.contains('<modules>') && !pomContent.contains('</modules><modules/>')) {
-        echo "⚠️ pom.xml has modules but directories may not exist. Will build root project only."
-      }
       available['root-app'] = [path: '.', type: 'maven', image: 'cinevision-app', required: true]
     } else if (fileExists('package.json')) {
-      echo "Found root package.json - treating as single Node.js project"
       available['root-app'] = [path: '.', type: 'node', image: 'cinevision-app', required: true]
     } else {
       error "No services or build files found in the repository!"
@@ -54,16 +47,23 @@ def discoverAvailableServices(serviceMap) {
 // Check if Maven can build successfully
 def canRunMavenBuild() {
   try {
-    // Quick validation - check if we can read the pom structure
     def hasValidPom = fileExists('pom.xml')
     if (!hasValidPom) return false
     
-    // Try to list modules without building
-    def result = sh(script: 'mvn help:evaluate -Dexpression=project.modules -q -DforceStdout 2>/dev/null || echo "NONE"', returnStdout: true).trim()
-    def hasInvalidModules = result.contains('NONE') || result.contains('ERROR')
+    // Check if we're in a service directory with its own pom.xml
+    def isStandaloneService = fileExists('pom.xml') && !fileExists('../pom.xml')
     
-    if (hasInvalidModules) {
-      echo "⚠️ Maven pom.xml has issues (possibly missing module directories). Skipping security scans."
+    if (isStandaloneService) {
+      echo "✅ Standalone service detected - can run Maven build"
+      return true
+    }
+    
+    // For root pom, check if modules exist
+    def result = sh(script: 'mvn help:evaluate -Dexpression=project.modules -q -DforceStdout 2>/dev/null | grep -v "NONE" | grep -v "\\[WARNING\\]" | head -1', returnStdout: true).trim()
+    def hasValidModules = result != null && result != '' && !result.contains('NONE') && !result.contains('ERROR')
+    
+    if (!hasValidModules) {
+      echo "⚠️ Maven pom.xml has no valid modules. Will build individual services instead."
       return false
     }
     
@@ -74,9 +74,33 @@ def canRunMavenBuild() {
   }
 }
 
+// Generate SonarQube properties file for a service
+def generateSonarProperties(serviceName, servicePath) {
+  def sonarProps = """
+sonar.projectKey=${serviceName}
+sonar.projectName=${serviceName}
+sonar.projectVersion=1.0
+
+# Path to source directories
+sonar.sources=src/main/java
+sonar.tests=src/test/java
+sonar.java.binaries=target/classes
+sonar.java.test.binaries=target/test-classes
+sonar.java.libraries=target/**/*.jar
+
+# Encoding
+sonar.sourceEncoding=UTF-8
+
+# Exclusions
+sonar.exclusions=**/generated/**/*.*,**/test/**/*.*
+"""
+  
+  writeFile file: "${servicePath}/sonar-project.properties", text: sonarProps
+  return "${servicePath}/sonar-project.properties"
+}
+
 // Enhanced change detection with service availability check
 def detectChangedServices(availableServices, branchName) {
-  // For first build or specific branches, build all available services
   def isFirstBuild = sh(script: 'git rev-parse HEAD~1 >/dev/null 2>&1; echo $?', returnStdout: true).trim() != '0'
   
   if (isFirstBuild) {
@@ -89,7 +113,6 @@ def detectChangedServices(availableServices, branchName) {
     return availableServices.keySet() as List
   }
   
-  // Detect changes only for available services
   def changedFiles = sh(
     script: "git diff --name-only HEAD~1 HEAD 2>/dev/null || echo ''",
     returnStdout: true
@@ -108,7 +131,6 @@ def detectChangedServices(availableServices, branchName) {
     }
   }
   
-  // Check for root build file changes
   def rootBuildFiles = ['pom.xml', 'package.json', 'build.gradle', 'Dockerfile', 'Jenkinsfile']
   if (changedFiles.any { rootBuildFiles.contains(it) }) {
     echo "⚠️ Root build file changed - including all services"
@@ -195,7 +217,6 @@ def getEnvironmentConfig(String branch) {
 
 def checkAndInstallTools(config) {
   script {
-    // Check for Docker
     def hasDocker = sh(script: 'command -v docker', returnStatus: true) == 0
     if (!hasDocker) {
       error "Docker is required but not installed on agent ${env.NODE_NAME}. Please install Docker or use a different agent."
@@ -205,13 +226,23 @@ def checkAndInstallTools(config) {
       echo "Docker version: ${dockerVersion}"
     }
     
-    // Check for AWS CLI
     def hasAws = sh(script: 'command -v aws', returnStatus: true) == 0
     if (!hasAws) {
       echo "Warning: AWS CLI not found. Some steps may fail."
     }
     
-    // Check for kubectl (only if deploy is enabled)
+    // Check for Dependency Check
+    def hasDepCheck = sh(script: 'command -v dependency-check.sh', returnStatus: true) == 0
+    if (!hasDepCheck && config.runSecurityScan) {
+      echo "Warning: OWASP Dependency Check not found. Install from: https://github.com/jeremylong/DependencyCheck"
+    }
+    
+    // Check for SonarQube scanner
+    def hasSonarScanner = sh(script: 'command -v sonar-scanner', returnStatus: true) == 0
+    if (!hasSonarScanner && config.runSecurityScan) {
+      echo "Warning: SonarQube scanner not found. Will use Maven plugin instead."
+    }
+    
     if (config.deployEnabled) {
       def hasKubectl = sh(script: 'command -v kubectl', returnStatus: true) == 0
       if (!hasKubectl) {
@@ -235,11 +266,9 @@ def buildService(serviceName, meta, envVars) {
     dir(meta.path) {
       echo "Working directory: ${pwd()}"
       
-      // Build based on type
       if (meta.type == 'maven') {
         if (fileExists('pom.xml')) {
           echo "Building Maven project..."
-          // Try to build with tests, fallback to skip tests
           def buildResult = sh(script: 'mvn clean package -DskipTests=false -Dmaven.repo.local=.m2/repository 2>&1', returnStatus: true)
           if (buildResult != 0) {
             echo "⚠️ Build with tests failed, trying with tests skipped..."
@@ -260,7 +289,6 @@ def buildService(serviceName, meta, envVars) {
         }
       }
       
-      // Build Docker image if Dockerfile exists
       if (fileExists('Dockerfile')) {
         def fullImageName = "${envVars.IMAGE_NAMESPACE}/${meta.image}"
         def imageTag = "${envVars.CURRENT_ECR_REGISTRY}/${fullImageName}:${envVars.IMAGE_TAG}"
@@ -269,7 +297,6 @@ def buildService(serviceName, meta, envVars) {
         echo "Building Docker image: ${imageTag}"
         sh "docker build -t ${imageTag} ."
         
-        // Run Trivy scan if available
         def hasTrivy = sh(script: 'command -v trivy', returnStatus: true) == 0
         if (hasTrivy && envVars.TRIVY_SEVERITY) {
           echo "Running Trivy security scan..."
@@ -278,7 +305,6 @@ def buildService(serviceName, meta, envVars) {
           echo "Trivy not installed. Skipping container security scan."
         }
         
-        // Push to ECR
         withAWS(credentials: envVars.AWS_CREDENTIALS_ID, region: envVars.AWS_REGION) {
           echo "Logging into ECR..."
           sh "aws ecr get-login-password --region ${envVars.AWS_REGION} | docker login --username AWS --password-stdin ${envVars.CURRENT_ECR_REGISTRY}"
@@ -313,7 +339,6 @@ def AVAILABLE_SERVICES = [:]
 def BUILD_RESULTS = [:]
 
 pipeline {
-  // Use any available agent
   agent any
   
   options {
@@ -330,6 +355,7 @@ pipeline {
     GITHUB_TOKEN = credentials('github-token')
     GITHUB_REPO = 'functionalprojects/cinevision-pro'
     JENKINS_AGENT_NAME = "${NODE_NAME}"
+    SONAR_HOST_URL = 'https://sonarcloud.io'
   }
   
   stages {
@@ -344,15 +370,12 @@ pipeline {
         }
       }
       steps {
-        // Checkout code
         checkout scm
         
         script {
-          // Discover available services
           def staticServiceMap = getServiceMap()
           AVAILABLE_SERVICES = discoverAvailableServices(staticServiceMap)
           
-          // Initialize CONFIG
           def CONFIG = getEnvironmentConfig(env.BRANCH_NAME)
           env.TARGET_ENV = CONFIG.env
           
@@ -360,7 +383,6 @@ pipeline {
             error "Branch ${env.BRANCH_NAME} is not mapped to any environment."
           }
           
-          // Store CONFIG in environment for later stages
           env.DEPLOY_ENABLED = CONFIG.deployEnabled.toString()
           env.APPROVAL_REQUIRED = CONFIG.approvalRequired.toString()
           env.RUN_SECURITY_SCAN = CONFIG.runSecurityScan.toString()
@@ -374,13 +396,11 @@ pipeline {
           env.AWS_CREDENTIALS_ID = CONFIG.awsCredentialsId
           env.CLOUDFRONT_DISTRIBUTION_ID = CONFIG.cloudfrontDistributionId
           
-          // Get AWS Account ID securely
           if (CONFIG.awsAccountIdCredentialsId) {
             withCredentials([string(credentialsId: CONFIG.awsAccountIdCredentialsId, variable: 'AWS_ACCOUNT_ID')]) {
               env.CURRENT_ECR_REGISTRY = "${AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
             }
           } else if (CONFIG.env == 'dev') {
-            // For dev environment, use a default or skip
             echo "⚠️ No AWS Account ID configured for dev environment"
             env.CURRENT_ECR_REGISTRY = "dev.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
           } else {
@@ -390,7 +410,6 @@ pipeline {
           env.GIT_COMMIT_SHORT = sh(script: 'git rev-parse --short=8 HEAD', returnStdout: true).trim()
           env.IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT_SHORT}"
           
-          // Check required tools
           checkAndInstallTools(CONFIG)
           
           echo "========================================"
@@ -406,57 +425,141 @@ pipeline {
     }
     
     stage('🔍 Security & Code Quality') {
-      // Skip security stage if no Maven services exist or pom.xml has issues
-      when { 
-        expression { 
-          def hasMavenServices = AVAILABLE_SERVICES.any { it.value.type == 'maven' }
-          def canRunMaven = hasMavenServices && canRunMavenBuild()
-          env.RUN_SECURITY_SCAN == 'true' && canRunMaven
-        } 
-      }
+      when { expression { env.RUN_SECURITY_SCAN == 'true' } }
       parallel {
-        stage('SCA: Dependency Check') {
+        stage('SCA: OWASP Dependency Check') {
           steps {
             script {
               def hasDepCheck = sh(script: 'command -v dependency-check.sh', returnStatus: true) == 0
-              if (hasDepCheck && fileExists('pom.xml')) {
-                // Only run dependency check on the root pom if it's valid
+              
+              if (!hasDepCheck) {
+                echo "========================================"
+                echo "⚠️ OWASP Dependency Check not installed!"
+                echo "Installation instructions:"
+                echo "  wget https://github.com/jeremylong/DependencyCheck/releases/download/v9.0.9/dependency-check-9.0.9-release.zip"
+                echo "  unzip dependency-check-9.0.9-release.zip"
+                echo "  sudo mv dependency-check /opt/"
+                echo "  sudo ln -s /opt/dependency-check/bin/dependency-check.sh /usr/local/bin/dependency-check.sh"
+                echo "========================================"
+                echo "Skipping Dependency Check scan..."
+                return
+              }
+              
+              // Find all pom.xml files to scan
+              def pomFiles = findFiles(glob: '**/pom.xml')
+              def scannedCount = 0
+              
+              for (pomFile in pomFiles) {
+                // Skip if it's in target directory
+                if (pomFile.path.contains('target/')) continue
+                
+                def serviceDir = new File(pomFile.path).getParent()
+                echo "Scanning dependencies for: ${serviceDir}"
+                
                 try {
-                  dependencyCheck additionalArguments: '--format HTML --format XML --out . --failOnError false', odcInstallation: 'DP-Check'
-                  dependencyCheckPublisher pattern: 'dependency-check-report.xml'
+                  dir(serviceDir) {
+                    sh """
+                      dependency-check.sh \
+                        --scan . \
+                        --format HTML \
+                        --format XML \
+                        --out ${env.WORKSPACE}/dependency-check-reports \
+                        --failOnError false \
+                        --enableExperimental
+                    """
+                  }
+                  scannedCount++
                 } catch (Exception e) {
-                  echo "Dependency check failed: ${e.message}. Continuing..."
+                  echo "⚠️ Dependency check failed for ${serviceDir}: ${e.message}"
                 }
+              }
+              
+              if (scannedCount > 0) {
+                dependencyCheckPublisher pattern: 'dependency-check-reports/**/dependency-check-report.xml'
+                archiveArtifacts artifacts: 'dependency-check-reports/**/*.html', allowEmptyArchive: true
+                echo "✅ Dependency Check completed for ${scannedCount} projects"
               } else {
-                echo "Dependency-check not available or no valid pom.xml. Skipping SCA scan."
+                echo "No pom.xml files found to scan"
               }
             }
           }
         }
         
-        stage('SAST: SonarCloud') {
+        stage('SAST: SonarCloud Analysis') {
           steps {
             script {
-              // Only run Sonar on individual service directories, not the root with missing modules
-              def hasValidService = AVAILABLE_SERVICES.any { it.value.type == 'maven' && fileExists("${it.value.path}/pom.xml") }
+              // Check if SonarQube is configured in Jenkins
+              def sonarConfigured = false
+              try {
+                def sonarServer = withSonarQubeEnv('sonarcloud') { 
+                  sonarConfigured = true
+                  echo "SonarQube server configured"
+                }
+              } catch(Exception e) {
+                echo "⚠️ SonarQube not configured in Jenkins"
+                echo "Please configure SonarQube in: Manage Jenkins → Configure System → SonarQube servers"
+              }
               
-              if (hasValidService) {
-                // Run Sonar on each available Maven service individually
-                AVAILABLE_SERVICES.each { serviceName, meta ->
-                  if (meta.type == 'maven' && fileExists("${meta.path}/pom.xml")) {
-                    dir(meta.path) {
-                      try {
-                        withSonarQubeEnv('sonarcloud') {
-                          sh "mvn sonar:sonar -Dsonar.projectKey=${serviceName} || echo 'Sonar scan failed but continuing'"
+              if (!sonarConfigured) {
+                echo "========================================"
+                echo "⚠️ SonarQube Scanner not configured!"
+                echo "To configure:"
+                echo "1. Install SonarQube Scanner plugin"
+                echo "2. Go to Manage Jenkins → Configure System → SonarQube servers"
+                echo "3. Add server with name 'sonarcloud'"
+                echo "4. Add authentication token from https://sonarcloud.io/account/security/"
+                echo "========================================"
+                echo "Skipping SonarCloud analysis..."
+                return
+              }
+              
+              def scannedServices = []
+              
+              // Run Sonar analysis for each Maven service
+              AVAILABLE_SERVICES.each { serviceName, meta ->
+                if (meta.type == 'maven' && fileExists("${meta.path}/pom.xml")) {
+                  echo "Running SonarCloud analysis for: ${serviceName}"
+                  
+                  dir(meta.path) {
+                    // Generate sonar-project.properties
+                    generateSonarProperties(serviceName, pwd())
+                    
+                    try {
+                      withSonarQubeEnv('sonarcloud') {
+                        // Try Maven Sonar plugin first
+                        def mvnResult = sh(script: 'mvn sonar:sonar -Dsonar.projectKey=' + serviceName + ' -Dsonar.organization=Functionpr -X 2>&1', returnStatus: true)
+                        if (mvnResult != 0) {
+                          echo "⚠️ Maven Sonar plugin failed, trying sonar-scanner..."
+                          // Fallback to sonar-scanner
+                          sh "sonar-scanner -Dsonar.projectKey=${serviceName} -Dsonar.sources=. -Dsonar.host.url=${SONAR_HOST_URL}"
                         }
-                      } catch(Exception e) {
-                        echo "SonarCloud scan failed for ${serviceName}: ${e.message}"
                       }
+                      scannedServices.add(serviceName)
+                    } catch(Exception e) {
+                      echo "⚠️ SonarCloud analysis failed for ${serviceName}: ${e.message}"
                     }
                   }
                 }
+              }
+              
+              if (scannedServices.isEmpty()) {
+                echo "No Maven services found for SonarCloud analysis"
               } else {
-                echo "No valid Maven services found. Skipping SonarCloud scan."
+                echo "✅ SonarCloud analysis triggered for: ${scannedServices.join(', ')}"
+                
+                // Wait for quality gate results (only for non-dev branches)
+                if (env.BRANCH_NAME != 'develop') {
+                  timeout(time: 15, unit: 'MINUTES') {
+                    def qualityGate = waitForQualityGate abortPipeline: false
+                    if (qualityGate.status != 'OK') {
+                      echo "⚠️ Quality gate failed: ${qualityGate.status}"
+                    } else {
+                      echo "✅ Quality gate passed!"
+                    }
+                  }
+                } else {
+                  echo "⚠️ Skipping quality gate wait for development branch"
+                }
               }
             }
           }
@@ -489,7 +592,6 @@ pipeline {
             TRIVY_SEVERITY: env.TRIVY_SEVERITY
           ]
           
-          // Build each service sequentially
           for (serviceName in changed) {
             if (!AVAILABLE_SERVICES.containsKey(serviceName)) {
               echo "⚠️ Service ${serviceName} is not available. Skipping..."
@@ -510,7 +612,6 @@ pipeline {
             }
           }
           
-          // Summary of builds
           echo "========================================"
           echo "Build Summary:"
           BUILD_RESULTS.each { name, result ->
@@ -539,7 +640,6 @@ pipeline {
             dir(overlay) {
               def changedServices = env.CHANGED_SERVICES.split(',')
               changedServices.each { serviceName ->
-                // Only update if service build was successful and has image tag
                 if (BUILD_RESULTS[serviceName]?.success && BUILD_RESULTS[serviceName]?.imageTag) {
                   if (serviceName != 'frontend' && AVAILABLE_SERVICES.containsKey(serviceName)) {
                     def meta = AVAILABLE_SERVICES[serviceName]
@@ -627,13 +727,14 @@ pipeline {
             if (hasArgoCD) {
               try {
                 withCredentials([usernamePassword(credentialsId: 'argocd-creds', passwordVariable: 'ARGO_PWD', usernameVariable: 'ARGO_USER')]) {
-                  sh "argocd login argocd.cinevision.com --username ${ARGO_USER} --password ${ARGO_PWD} --insecure || echo 'ArgoCD login failed'"
+                  sh "argocd login argocd.cinevision.com --username ${ARGO_USER} --password ${ARGO_PWD} --insecure --grpc-web || echo 'ArgoCD login failed'"
                 }
-                sh "argocd app sync ${env.ARGOCD_APP} --grpc-web --prune || echo 'Sync failed'"
+                sh "argocd app sync ${env.ARGOCD_APP} --prune || echo 'Sync failed'"
                 sh "argocd app wait ${env.ARGOCD_APP} --health --timeout 600 || echo 'Wait failed'"
                 echo "✅ ArgoCD sync completed"
               } catch (Exception e) {
                 echo "ArgoCD operation failed: ${e.message}"
+                echo "Please ensure credentials 'argocd-creds' are configured in Jenkins"
               }
             } else {
               echo "ArgoCD CLI not found. Skipping ArgoCD deployment."
@@ -661,8 +762,19 @@ pipeline {
                 echo "Integration tests not found. Skipping."
               }
               
+              // Fixed ZAP Docker image
               if (env.API_URL) {
-                sh "docker run --rm -v \$(pwd):/zap/wrk/:rw -t owasp/zap2docker-stable zap-baseline.py -t ${env.API_URL} -r zap_report.html || true"
+                sh """
+                  docker pull ghcr.io/zaproxy/zaproxy:stable || true
+                  docker run --rm \
+                    -v \$(pwd):/zap/wrk/:rw \
+                    -t ghcr.io/zaproxy/zaproxy:stable \
+                    zap-baseline.py \
+                    -t ${env.API_URL} \
+                    -r zap_report.html \
+                    -j \
+                    || true
+                """
                 archiveArtifacts artifacts: 'zap_report.html', allowEmptyArchive: true
               }
             }
@@ -674,7 +786,15 @@ pipeline {
             script {
               if (fileExists('tests/performance/cinevision-load-test.js')) {
                 dir('tests/performance') { 
-                  sh "docker run --rm -v \$(pwd):/tests -t grafana/k6 run /tests/cinevision-load-test.js -e BASE_URL=${env.API_URL} || echo 'Performance tests failed'"
+                  sh """
+                    docker pull grafana/k6:latest || true
+                    docker run --rm \
+                      -v \$(pwd):/tests \
+                      -t grafana/k6:latest \
+                      run /tests/cinevision-load-test.js \
+                      -e BASE_URL=${env.API_URL} \
+                    || echo 'Performance tests failed'
+                  """
                 }
               } else {
                 echo "Performance tests not found. Skipping."
@@ -691,17 +811,29 @@ pipeline {
       script {
         def successfulServices = BUILD_RESULTS.findAll { it.value.success }.keySet().join(', ')
         echo "Pipeline completed successfully! Services built: ${successfulServices ?: 'None'}"
+        
+        // Send success notification (optional)
+        slackSend(
+          color: 'good',
+          message: "✅ Pipeline SUCCESS for ${env.JOB_NAME} #${env.BUILD_NUMBER}\nEnvironment: ${env.TARGET_ENV}\nServices: ${successfulServices ?: 'None'}"
+        )
       }
     }
     failure { 
       script {
         def failedServices = BUILD_RESULTS.findAll { !it.value.success }.keySet().join(', ')
         echo "Pipeline failed. Failed services: ${failedServices ?: 'Unknown'}"
+        
+        // Send failure notification (optional)
+        slackSend(
+          color: 'danger',
+          message: "❌ Pipeline FAILED for ${env.JOB_NAME} #${env.BUILD_NUMBER}\nEnvironment: ${env.TARGET_ENV}\nFailed services: ${failedServices ?: 'Unknown'}\nCheck logs: ${env.BUILD_URL}"
+        )
       }
     }
     always { 
       script {
-        junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml, **/test-results/**/*.xml'
+        junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml, **/test-results/**/*.xml, dependency-check-reports/**/*.xml'
         cleanWs() 
       }
     }
