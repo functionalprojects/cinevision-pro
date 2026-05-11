@@ -1,0 +1,39 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: cinevision-dev
+resources:
+  - ../../base
+  - ingress.yaml
+images:
+  - name: api-gateway
+    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/cinevision/api-gateway
+    newTag: latest
+  - name: user-service
+    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/cinevision/user-service
+    newTag: latest
+  - name: movie-service
+    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/cinevision/movie-service
+    newTag: latest
+  - name: email-service
+    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/cinevision/email-service
+    newTag: latest
+  - name: eureka-server
+    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/cinevision/eureka-server
+    newTag: latest
+  - name: frontend
+    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/cinevision/frontend
+    newTag: latest
+replicas:
+  - name: api-gateway
+    count: 1
+  - name: user-service
+    count: 1
+  - name: movie-service
+    count: 1
+  - name: email-service
+    count: 1
+  - name: frontend
+    count: 1
+patches:
+  - path: configmap-patch.yaml
+  - path: externalsecret-patch.yaml
