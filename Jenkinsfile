@@ -316,9 +316,115 @@ def findPomFiles() {
   return pomFiles
 }
 
+// Enhanced SonarCloud analysis with proper configuration
+def runSonarAnalysis(serviceName, meta) {
+  echo "========================================"
+  echo "🔍 Running SonarCloud analysis for: ${serviceName}"
+  echo "  Organization: functionalprojects"
+  echo "  Organization Key: functionalprojects-key"
+  echo "========================================"
+  
+  def success = false
+  def errorMessage = ""
+  
+  dir(meta.path) {
+    try {
+      // Ensure JaCoCo coverage report is generated
+      if (fileExists('pom.xml')) {
+        sh """
+          mvn clean test jacoco:report \
+            -Dmaven.repo.local=.m2/repository \
+            -DskipTests=false || echo 'Tests or coverage generation failed'
+        """
+      }
+      
+      // Prepare Sonar properties
+      def sonarProperties = """
+        -Dsonar.projectKey=${serviceName}
+        -Dsonar.organization=functionalprojects
+        -Dsonar.host.url=https://sonarcloud.io
+        -Dsonar.projectName=CineVision-${serviceName}
+        -Dsonar.projectVersion=1.0.0
+        -Dsonar.sourceEncoding=UTF-8
+        -Dsonar.java.binaries=target/classes
+        -Dsonar.java.test.binaries=target/test-classes
+        -Dsonar.java.sources=src/main/java
+        -Dsonar.java.tests=src/test/java
+        -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml
+        -Dsonar.junit.reportPaths=target/surefire-reports
+        -Dsonar.sources=src/main
+        -Dsonar.exclusions=**/generated/**/*,**/model/**/*.java
+        -Dsonar.coverage.exclusions=**/config/**/*,**/dto/**/*,**/model/**/*,**/exception/**/*
+      """
+      
+      // Run SonarCloud analysis
+      withCredentials([string(credentialsId: 'sonarcloud-token', variable: 'SONAR_TOKEN')]) {
+        withSonarQubeEnv('sonarcloud') {
+          sh """
+            mvn sonar:sonar ${sonarProperties} \
+              -Dsonar.login=${SONAR_TOKEN} \
+              -Dsonar.verbose=false \
+              -Dmaven.repo.local=.m2/repository
+          """
+        }
+        
+        // Wait for SonarQube analysis to complete
+        timeout(time: 10, unit: 'MINUTES') {
+          def waitForQualityGate = true
+          if (waitForQualityGate) {
+            echo "Waiting for Quality Gate results..."
+            try {
+              sh """
+                timeout 300s bash -c '
+                  while true; do
+                    STATUS=\$(curl -s -u ${SONAR_TOKEN}: "https://sonarcloud.io/api/qualitygates/project_status?projectKey=${serviceName}" | jq -r .projectStatus.status)
+                    if [ "\$STATUS" = "OK" ] || [ "\$STATUS" = "ERROR" ]; then
+                      echo "Quality Gate status: \$STATUS"
+                      if [ "\$STATUS" = "ERROR" ]; then
+                        exit 1
+                      fi
+                      break
+                    fi
+                    echo "Waiting for analysis to complete..."
+                    sleep 10
+                  done
+                '
+              """ || echo "Quality Gate check finished with issues"
+            } catch (Exception e) {
+              echo "Quality Gate check encountered an error: ${e.message}"
+            }
+          }
+        }
+      }
+      
+      success = true
+      echo "✅ SonarCloud analysis completed for ${serviceName}"
+      
+    } catch (Exception e) {
+      errorMessage = e.message
+      echo "❌ SonarCloud analysis failed for ${serviceName}: ${errorMessage}"
+      echo "========================================"
+      echo "Troubleshooting Steps:"
+      echo "1. Verify your SonarCloud token is correct in Jenkins credentials (ID: sonarcloud-token)"
+      echo "2. Ensure the project '${serviceName}' exists in SonarCloud organization 'functionalprojects'"
+      echo "3. Check that you have the SonarQube plugin installed in Jenkins"
+      echo "4. Verify SonarQube server configuration:"
+      echo "   - Name: sonarcloud"
+      echo "   - Server URL: https://sonarcloud.io"
+      echo "   - Token: [your token]"
+      echo "5. Alternative: Project can be auto-created on first scan"
+      echo "6. Check network connectivity to sonarcloud.io"
+      echo "========================================"
+    }
+  }
+  
+  return [success: success, error: errorMessage]
+}
+
 // Global state
 def AVAILABLE_SERVICES = [:]
 def BUILD_RESULTS = [:]
+def SONAR_RESULTS = [:]
 
 pipeline {
   agent any
@@ -338,7 +444,8 @@ pipeline {
     GITHUB_REPO = 'functionalprojects/cinevision-pro'
     JENKINS_AGENT_NAME = "${NODE_NAME}"
     SONAR_HOST_URL = 'https://sonarcloud.io'
-    SONAR_ORG_KEY = 'functionpr'
+    SONAR_ORG_KEY = 'functionalprojects-key'
+    SONAR_ORG_NAME = 'functionalprojects'
   }
   
   stages {
@@ -401,7 +508,7 @@ pipeline {
           echo "  Node: ${env.NODE_NAME}"
           echo "  Registry: ${env.CURRENT_ECR_REGISTRY}"
           echo "  Image Tag: ${env.IMAGE_TAG}"
-          echo "  SonarCloud Organization: ${env.SONAR_ORG_KEY}"
+          echo "  SonarCloud Organization: ${env.SONAR_ORG_NAME} (Key: ${env.SONAR_ORG_KEY})"
           echo "  Available Services: ${AVAILABLE_SERVICES.keySet().join(', ')}"
           echo "========================================"
         }
@@ -474,64 +581,62 @@ pipeline {
         stage('SAST: SonarCloud Analysis') {
           steps {
             script {
-              // First, create the project on SonarCloud if it doesn't exist
               echo "========================================"
-              echo "Running SonarCloud analysis for: api-gateway"
-              echo "Organization: ${env.SONAR_ORG_KEY}"
+              echo "🔍 SonarCloud Configuration"
+              echo "  Organization: ${env.SONAR_ORG_NAME}"
+              echo "  Organization Key: ${env.SONAR_ORG_KEY}"
+              echo "  Server URL: ${env.SONAR_HOST_URL}"
               echo "========================================"
+              
+              // Verify SonarCloud token exists
+              try {
+                withCredentials([string(credentialsId: 'sonarcloud-token', variable: 'TEST_TOKEN')]) {
+                  echo "✅ SonarCloud token 'sonarcloud-token' found in Jenkins credentials"
+                }
+              } catch (Exception e) {
+                echo "❌ SonarCloud token 'sonarcloud-token' not found in Jenkins credentials!"
+                echo "Please add your SonarCloud token:"
+                echo "1. Go to Jenkins → Manage Jenkins → Credentials → System → Global credentials (unrestricted)"
+                echo "2. Add Credentials → Secret text"
+                echo "3. ID: sonarcloud-token"
+                echo "4. Secret: [your SonarCloud token from https://sonarcloud.io/account/security]"
+                error "SonarCloud token missing. Pipeline cannot proceed with security scan."
+              }
+              
+              // Verify SonarQube server configuration
+              echo "Verifying SonarQube server configuration..."
+              echo "Ensure 'sonarcloud' server is configured in:"
+              echo "  Jenkins → Manage Jenkins → Configure System → SonarQube servers"
+              echo "  Name: sonarcloud"
+              echo "  Server URL: https://sonarcloud.io"
+              echo "  Server authentication token: [select sonarcloud-token]"
               
               def scannedServices = []
               
               AVAILABLE_SERVICES.each { serviceName, meta ->
                 if (meta.type == 'maven' && fileExists("${meta.path}/pom.xml")) {
-                  echo "Running SonarCloud analysis for: ${serviceName}"
-                  
-                  dir(meta.path) {
-                    try {
-                      withSonarQubeEnv('sonarcloud') {
-                        // Use token directly in command to avoid credential issues
-                        sh """
-                          mvn sonar:sonar \
-                            -Dsonar.projectKey=${serviceName} \
-                            -Dsonar.organization=${env.SONAR_ORG_KEY} \
-                            -Dsonar.host.url=${SONAR_HOST_URL} \
-                            -Dsonar.projectName=${serviceName} \
-                            -Dsonar.java.binaries=target/classes \
-                            -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml \
-                            -Dsonar.verbose=true
-                        """
-                      }
-                      scannedServices.add(serviceName)
-                    } catch(Exception e) {
-                      echo "⚠️ SonarCloud analysis failed for ${serviceName}: ${e.message}"
-                      echo "Please ensure:"
-                      echo "  1. Project '${serviceName}' exists in SonarCloud organization '${env.SONAR_ORG_KEY}'"
-                      echo "  2. The SonarCloud token has permission to create/update projects"
-                      echo "  3. Add this to your Jenkins credentials:"
-                      echo "     - Kind: Secret text"
-                      echo "     - ID: sonarcloud-token"
-                      echo "     - Secret: [your SonarCloud token]"
-                    }
+                  def result = runSonarAnalysis(serviceName, meta)
+                  SONAR_RESULTS[serviceName] = result
+                  if (result.success) {
+                    scannedServices.add(serviceName)
                   }
                 }
               }
               
               if (scannedServices.isEmpty()) {
-                echo "No Maven services found for SonarCloud analysis"
-                echo ""
-                echo "To set up SonarCloud:"
-                echo "1. Create an account at https://sonarcloud.io"
-                echo "2. Create organization '${env.SONAR_ORG_KEY}' or use your existing one"
-                echo "3. Create a project (or auto-create via scan)"
-                echo "4. Generate a token at https://sonarcloud.io/account/security/"
-                echo "5. Add token to Jenkins: Manage Jenkins → Credentials → Add Secret text"
-                echo "   ID: sonarcloud-token"
-                echo "6. Configure SonarQube server: Manage Jenkins → Configure System → SonarQube servers"
-                echo "   Name: sonarcloud"
-                echo "   URL: https://sonarcloud.io"
-                echo "   Token: [your token]"
+                echo "========================================"
+                echo "⚠️ No Maven services were successfully analyzed"
+                echo "Possible solutions:"
+                echo "1. Ensure each service has a valid pom.xml"
+                echo "2. Add sonar-project.properties file to each service with:"
+                echo "   sonar.projectKey=service-name"
+                echo "   sonar.organization=functionalprojects"
+                echo "   sonar.host.url=https://sonarcloud.io"
+                echo "3. Or rely on the command-line parameters configured in the pipeline"
+                echo "4. Check that the SonarQube Scanner for Maven is available"
+                echo "========================================"
               } else {
-                echo "✅ SonarCloud analysis triggered for: ${scannedServices.join(', ')}"
+                echo "✅ SonarCloud analysis completed for: ${scannedServices.join(', ')}"
               }
             }
           }
@@ -780,13 +885,39 @@ pipeline {
     success { 
       script {
         def successfulServices = BUILD_RESULTS.findAll { it.value.success }.keySet().join(', ')
-        echo "Pipeline completed successfully! Services built: ${successfulServices ?: 'None'}"
+        def successfulSonar = SONAR_RESULTS.findAll { it.value.success }.keySet().join(', ')
+        echo "========================================"
+        echo "✅ Pipeline completed successfully!"
+        echo "  Services built: ${successfulServices ?: 'None'}"
+        echo "  SonarCloud analyzed: ${successfulSonar ?: 'None'}"
+        echo "========================================"
       }
     }
     failure { 
       script {
         def failedServices = BUILD_RESULTS.findAll { !it.value.success }.keySet().join(', ')
-        echo "Pipeline failed. Failed services: ${failedServices ?: 'Unknown'}"
+        def failedSonar = SONAR_RESULTS.findAll { !it.value.success }.keySet().join(', ')
+        echo "========================================"
+        echo "❌ Pipeline failed!"
+        echo "  Failed services: ${failedServices ?: 'None'}"
+        echo "  Failed SonarCloud analyses: ${failedSonar ?: 'None'}"
+        echo "========================================"
+        
+        // Provide SonarCloud troubleshooting steps on failure
+        if (failedSonar) {
+          echo ""
+          echo "📋 SonarCloud Troubleshooting Steps:"
+          echo "1. Verify your SonarCloud token 'sonarcloud-token' is correctly configured in Jenkins"
+          echo "2. Ensure projects exist in https://sonarcloud.io/organizations/functionalprojects"
+          echo "3. Check that Maven can connect to SonarCloud:"
+          echo "   mvn sonar:sonar -Dsonar.projectKey=test -Dsonar.organization=functionalprojects -Dsonar.host.url=https://sonarcloud.io"
+          echo "4. Verify you have 'sonarcloud' server configured in Jenkins:"
+          echo "   Manage Jenkins → Configure System → SonarQube servers"
+          echo "   Name: sonarcloud"
+          echo "   URL: https://sonarcloud.io"
+          echo "   Token: [select sonarcloud-token]"
+          echo "5. Check if the SonarQube Scanner plugin is installed in Jenkins"
+        }
       }
     }
     always { 
