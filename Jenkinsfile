@@ -111,12 +111,16 @@ def detectChangedServices(serviceMap) {
   return changed.unique()
 }
 
-def checkAndInstallTools() {
+def checkAndInstallTools(config) {
   script {
     // Check for Docker
     def hasDocker = sh(script: 'command -v docker', returnStatus: true) == 0
     if (!hasDocker) {
       error "Docker is required but not installed on agent ${env.NODE_NAME}. Please install Docker or use a different agent."
+    } else {
+      echo "Docker found at: ${sh(script: 'which docker', returnStdout: true).trim()}"
+      def dockerVersion = sh(script: 'docker --version', returnStdout: true).trim()
+      echo "Docker version: ${dockerVersion}"
     }
     
     // Check for AWS CLI
@@ -125,22 +129,23 @@ def checkAndInstallTools() {
       echo "Warning: AWS CLI not found. Some steps may fail."
     }
     
-    // Check for kubectl
-    def hasKubectl = sh(script: 'command -v kubectl', returnStatus: true) == 0
-    if (!hasKubectl && CONFIG.deployEnabled) {
-      echo "Warning: kubectl not found. Kubernetes deployments may fail."
+    // Check for kubectl (only if deploy is enabled)
+    if (config.deployEnabled) {
+      def hasKubectl = sh(script: 'command -v kubectl', returnStatus: true) == 0
+      if (!hasKubectl && config.deployEnabled) {
+        echo "Warning: kubectl not found. Kubernetes deployments may fail."
+      }
     }
     
-    echo "Agent ${env.NODE_NAME} ready with: Docker=${hasDocker}, AWS=${hasAws}, Kubectl=${hasKubectl}"
+    echo "Agent ${env.NODE_NAME} ready with: Docker=${hasDocker}, AWS=${hasAws}"
   }
 }
 
-// Global state (Non-serialized)
-def CONFIG = [:]
+// Global state
 def SERVICE_MAP = getServiceMap()
 
 pipeline {
-  // CHANGE: Use any available agent instead of specific label
+  // Use any available agent
   agent any
   
   options {
@@ -148,7 +153,7 @@ pipeline {
     disableConcurrentBuilds()
     buildDiscarder(logRotator(numToKeepStr: '30'))
     timeout(time: 90, unit: 'MINUTES')
-    skipDefaultCheckout() // We'll handle checkout manually for better control
+    skipDefaultCheckout()
   }
   
   environment {
@@ -156,6 +161,7 @@ pipeline {
     IMAGE_NAMESPACE = 'cinevision'
     GITHUB_TOKEN = credentials('github-token')
     GITHUB_REPO = 'functionalprojects/cinevision-pro'
+    JENKINS_AGENT_NAME = "${NODE_NAME}"
   }
   
   stages {
@@ -170,21 +176,31 @@ pipeline {
         }
       }
       steps {
-        // Checkout code at the beginning
+        // Checkout code
         checkout scm
         
         script {
-          CONFIG = getEnvironmentConfig(env.BRANCH_NAME)
+          // Initialize CONFIG first
+          def CONFIG = getEnvironmentConfig(env.BRANCH_NAME)
           env.TARGET_ENV = CONFIG.env
           
           if (env.TARGET_ENV == 'unknown') {
             error "Branch ${env.BRANCH_NAME} is not mapped to any environment."
           }
           
-          // Check if running on PR or feature branch
-          if (env.CHANGE_ID) {
-            echo "Running on Pull Request #${env.CHANGE_ID}"
-          }
+          // Store CONFIG in environment for later stages
+          env.DEPLOY_ENABLED = CONFIG.deployEnabled.toString()
+          env.APPROVAL_REQUIRED = CONFIG.approvalRequired.toString()
+          env.RUN_SECURITY_SCAN = CONFIG.runSecurityScan.toString()
+          env.RUN_PERFORMANCE_TESTS = CONFIG.runPerformanceTests.toString()
+          env.RUN_INTEGRATION_TESTS = CONFIG.runIntegrationTests.toString()
+          env.TRIVY_SEVERITY = CONFIG.trivySeverity
+          env.ARGOCD_APP = CONFIG.argocdApp
+          env.FRONTEND_BUCKET = CONFIG.frontendBucket
+          env.API_URL = CONFIG.apiUrl
+          env.KUSTOMIZE_OVERLAY = CONFIG.kustomizeOverlay
+          env.AWS_CREDENTIALS_ID = CONFIG.awsCredentialsId
+          env.CLOUDFRONT_DISTRIBUTION_ID = CONFIG.cloudfrontDistributionId
           
           // Get AWS Account ID securely
           if (CONFIG.awsAccountIdCredentialsId) {
@@ -198,29 +214,29 @@ pipeline {
           env.GIT_COMMIT_SHORT = sh(script: 'git rev-parse --short=8 HEAD', returnStdout: true).trim()
           env.IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT_SHORT}"
           
-          // Check required tools
-          checkAndInstallTools()
+          // Check required tools (pass CONFIG as parameter)
+          checkAndInstallTools(CONFIG)
           
           echo "Pipeline initialized for ${env.TARGET_ENV} on node ${env.NODE_NAME}"
-          echo "Services to be processed will be detected from changes"
+          echo "Docker registry: ${env.CURRENT_ECR_REGISTRY}"
+          echo "Image tag: ${env.IMAGE_TAG}"
         }
       }
     }
     
     stage('🔍 Security & Code Quality') {
-      when { expression { CONFIG.runSecurityScan } }
+      when { expression { env.RUN_SECURITY_SCAN == 'true' } }
       parallel {
         stage('SCA: Dependency Check') {
           steps {
             script {
               // Check if dependency-check is available
               def hasDepCheck = sh(script: 'command -v dependency-check.sh', returnStatus: true) == 0
-              if (hasDepCheck) {
+              if (hasDepCheck && fileExists('pom.xml')) {
                 dependencyCheck additionalArguments: '--format HTML --format XML --out .', odcInstallation: 'DP-Check'
                 dependencyCheckPublisher pattern: 'dependency-check-report.xml'
               } else {
-                echo "Dependency-check not installed. Skipping SCA scan."
-                echo "Install with: https://github.com/jeremylong/DependencyCheck"
+                echo "Dependency-check not installed or no pom.xml found. Skipping SCA scan."
               }
             }
           }
@@ -229,13 +245,17 @@ pipeline {
         stage('SAST: SonarCloud') {
           steps {
             script {
-              // Check if SonarQube is configured
+              // Check if SonarQube is configured and pom.xml exists
               if (fileExists('pom.xml')) {
-                withSonarQubeEnv('sonarcloud') {
-                  sh 'mvn sonar:sonar || echo "Sonar scan failed but continuing"'
-                }
-                timeout(time: 15, unit: 'MINUTES') {
-                  waitForQualityGate abortPipeline: false // Don't abort, just report
+                try {
+                  withSonarQubeEnv('sonarcloud') {
+                    sh 'mvn sonar:sonar || echo "Sonar scan failed but continuing"'
+                  }
+                  timeout(time: 15, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: false
+                  }
+                } catch(Exception e) {
+                  echo "SonarCloud scan failed: ${e.message}"
                 }
               } else {
                 echo "No pom.xml found. Skipping SonarCloud scan."
@@ -259,8 +279,7 @@ pipeline {
             return
           }
           
-          // Run builds sequentially instead of parallel to avoid node requirements
-          // This is more compatible with 'agent any' setup
+          // Run builds sequentially
           for (serviceName in changed) {
             def meta = SERVICE_MAP[serviceName]
             
@@ -276,7 +295,7 @@ pipeline {
                   sh "npm test || echo 'No tests configured'"
                 }
                 
-                // Only build Docker image if Dockerfile exists
+                // Build Docker image if Dockerfile exists
                 if (fileExists('Dockerfile')) {
                   def fullImageName = "${env.IMAGE_NAMESPACE}/${meta.image}"
                   def imageTag = "${env.CURRENT_ECR_REGISTRY}/${fullImageName}:${env.IMAGE_TAG}"
@@ -285,14 +304,14 @@ pipeline {
                   
                   // Run Trivy scan if available
                   def hasTrivy = sh(script: 'command -v trivy', returnStatus: true) == 0
-                  if (hasTrivy && CONFIG.trivySeverity) {
-                    sh "trivy image --severity ${CONFIG.trivySeverity} --ignore-unfixed --exit-code 0 ${imageTag} || echo 'Trivy scan found issues but continuing'"
+                  if (hasTrivy && env.TRIVY_SEVERITY) {
+                    sh "trivy image --severity ${env.TRIVY_SEVERITY} --ignore-unfixed --exit-code 0 ${imageTag} || echo 'Trivy scan found issues but continuing'"
                   } else {
                     echo "Trivy not installed. Skipping container security scan."
                   }
                   
                   // Push to ECR
-                  withAWS(credentials: CONFIG.awsCredentialsId, region: env.AWS_REGION) {
+                  withAWS(credentials: env.AWS_CREDENTIALS_ID, region: env.AWS_REGION) {
                     sh "aws ecr get-login-password --region ${env.AWS_REGION} | docker login --username AWS --password-stdin ${env.CURRENT_ECR_REGISTRY}"
                     retry(3) { 
                       sh "docker push ${imageTag}" 
@@ -313,10 +332,10 @@ pipeline {
     }
     
     stage('📂 GitOps Manifest Update') {
-      when { expression { CONFIG.deployEnabled && env.CHANGED_SERVICES != null && env.CHANGED_SERVICES != '' } }
+      when { expression { env.DEPLOY_ENABLED == 'true' && env.CHANGED_SERVICES != null && env.CHANGED_SERVICES != '' } }
       steps {
         script {
-          def overlay = CONFIG.kustomizeOverlay
+          def overlay = env.KUSTOMIZE_OVERLAY
           if (fileExists(overlay)) {
             dir(overlay) {
               def changedServices = env.CHANGED_SERVICES.split(',')
@@ -329,7 +348,7 @@ pipeline {
               }
             }
             
-            // Commit and push changes if any
+            // Commit and push changes
             sh """
               git config user.email "jenkins@cinevision.com"
               git config user.name "Jenkins CI"
@@ -348,21 +367,21 @@ pipeline {
       when { expression { 
         env.CHANGED_SERVICES != null && 
         env.CHANGED_SERVICES.split(',').contains('frontend') && 
-        CONFIG.frontendBucket 
+        env.FRONTEND_BUCKET 
       } }
       steps {
         script {
-          withAWS(credentials: CONFIG.awsCredentialsId, region: env.AWS_REGION) {
+          withAWS(credentials: env.AWS_CREDENTIALS_ID, region: env.AWS_REGION) {
             dir(SERVICE_MAP['frontend'].path) {
               sh 'npm ci --legacy-peer-deps || npm install'
               sh 'npm run build || echo "Build script not found"'
               
-              def buildDir = fileExists('dist') ? 'dist' : (fileExists('build') ? 'build' : '.')
-              if (buildDir != '.' && fileExists(buildDir)) {
-                sh "aws s3 sync ${buildDir} s3://${CONFIG.frontendBucket} --delete"
+              def buildDir = fileExists('dist') ? 'dist' : (fileExists('build') ? 'build' : null)
+              if (buildDir && fileExists(buildDir)) {
+                sh "aws s3 sync ${buildDir} s3://${env.FRONTEND_BUCKET} --delete"
                 
-                if (CONFIG.cloudfrontDistributionId) {
-                  withCredentials([string(credentialsId: CONFIG.cloudfrontDistributionId, variable: 'CF_ID')]) {
+                if (env.CLOUDFRONT_DISTRIBUTION_ID) {
+                  withCredentials([string(credentialsId: env.CLOUDFRONT_DISTRIBUTION_ID, variable: 'CF_ID')]) {
                     sh "aws cloudfront create-invalidation --distribution-id ${CF_ID} --paths '/*'"
                   }
                 }
@@ -376,27 +395,27 @@ pipeline {
     }
     
     stage('🚢 Deployment & Verification') {
-      when { expression { CONFIG.deployEnabled && CONFIG.argocdApp } }
+      when { expression { env.DEPLOY_ENABLED == 'true' && env.ARGOCD_APP } }
       steps {
         script {
-          if (CONFIG.approvalRequired) {
+          if (env.APPROVAL_REQUIRED == 'true') {
             input message: "Approve deployment to ${env.TARGET_ENV}?", ok: "Deploy"
           }
           
-          withAWS(credentials: CONFIG.awsCredentialsId, region: env.AWS_REGION) {
+          withAWS(credentials: env.AWS_CREDENTIALS_ID, region: env.AWS_REGION) {
             // Check if ArgoCD CLI is available
             def hasArgoCD = sh(script: 'command -v argocd', returnStatus: true) == 0
             if (hasArgoCD) {
               withCredentials([usernamePassword(credentialsId: 'argocd-creds', passwordVariable: 'ARGO_PWD', usernameVariable: 'ARGO_USER')]) {
                 sh "argocd login argocd.cinevision.com --username ${ARGO_USER} --password ${ARGO_PWD} --insecure || echo 'ArgoCD login failed'"
               }
-              sh "argocd app sync ${CONFIG.argocdApp} --grpc-web --prune || echo 'Sync failed'"
-              sh "argocd app wait ${CONFIG.argocdApp} --health --timeout 600 || echo 'Wait failed'"
+              sh "argocd app sync ${env.ARGOCD_APP} --grpc-web --prune || echo 'Sync failed'"
+              sh "argocd app wait ${env.ARGOCD_APP} --health --timeout 600 || echo 'Wait failed'"
             } else {
               echo "ArgoCD CLI not found. Skipping ArgoCD deployment."
               // Fallback to kubectl
               if (fileExists('k8s')) {
-                sh "kubectl apply -k ${CONFIG.kustomizeOverlay} || echo 'kubectl apply failed'"
+                sh "kubectl apply -k ${env.KUSTOMIZE_OVERLAY} || echo 'kubectl apply failed'"
               }
             }
             
@@ -405,7 +424,7 @@ pipeline {
               echo "🚥 Starting Canary Analysis"
               if (fileExists('scripts/canary-analysis.py')) {
                 try {
-                  sh "python3 scripts/canary-analysis.py --url ${CONFIG.apiUrl} --duration 60"
+                  sh "python3 scripts/canary-analysis.py --url ${env.API_URL} --duration 60"
                 } catch (Exception e) {
                   if (fileExists('k8s/overlays/prod/blue')) {
                     sh "kubectl apply -k k8s/overlays/prod/blue" // Emergency Revert
@@ -427,7 +446,7 @@ pipeline {
     }
     
     stage('✅ Post-Deployment Tests') {
-      when { expression { CONFIG.runIntegrationTests } }
+      when { expression { env.RUN_INTEGRATION_TESTS == 'true' } }
       parallel {
         stage('Integration & DAST') {
           steps {
@@ -435,27 +454,27 @@ pipeline {
               if (fileExists('tests/integration')) {
                 dir('tests/integration') { 
                   sh "npm install || echo 'No package.json'"
-                  sh "BASE_URL=${CONFIG.apiUrl} npm test || echo 'Integration tests failed'"
+                  sh "BASE_URL=${env.API_URL} npm test || echo 'Integration tests failed'"
                 }
               } else {
                 echo "Integration tests not found. Skipping."
               }
               
-              // Run ZAP scan if Docker is available
-              if (CONFIG.apiUrl) {
-                sh "docker run --rm -v \$(pwd):/zap/wrk/:rw -t owasp/zap2docker-stable zap-baseline.py -t ${CONFIG.apiUrl} -r zap_report.html || true"
+              // Run ZAP scan if Docker is available and API URL exists
+              if (env.API_URL) {
+                sh "docker run --rm -v \$(pwd):/zap/wrk/:rw -t owasp/zap2docker-stable zap-baseline.py -t ${env.API_URL} -r zap_report.html || true"
                 archiveArtifacts artifacts: 'zap_report.html', allowEmptyArchive: true
               }
             }
           }
         }
         stage('Performance') {
-          when { expression { CONFIG.runPerformanceTests } }
+          when { expression { env.RUN_PERFORMANCE_TESTS == 'true' } }
           steps {
             script {
               if (fileExists('tests/performance/cinevision-load-test.js')) {
                 dir('tests/performance') { 
-                  sh "docker run --rm -v \$(pwd):/tests -t grafana/k6 run /tests/cinevision-load-test.js -e BASE_URL=${CONFIG.apiUrl} || echo 'Performance tests failed'"
+                  sh "docker run --rm -v \$(pwd):/tests -t grafana/k6 run /tests/cinevision-load-test.js -e BASE_URL=${env.API_URL} || echo 'Performance tests failed'"
                 }
               } else {
                 echo "Performance tests not found. Skipping."
@@ -470,12 +489,18 @@ pipeline {
   post {
     success { 
       script {
-        sendSlackNotification('SUCCESSFUL')
+        slackSend(
+          color: 'good',
+          message: "✅ CineVision Build SUCCESSFUL\nJob: ${env.JOB_NAME}\nBuild: #${env.BUILD_NUMBER}\nEnvironment: ${env.TARGET_ENV}\nNode: ${env.NODE_NAME}"
+        )
       }
     }
     failure { 
       script {
-        sendSlackNotification('FAILED')
+        slackSend(
+          color: 'danger', 
+          message: "❌ CineVision Build FAILED\nJob: ${env.JOB_NAME}\nBuild: #${env.BUILD_NUMBER}\nEnvironment: ${env.TARGET_ENV}\nNode: ${env.NODE_NAME}"
+        )
       }
     }
     always { 
@@ -485,31 +510,4 @@ pipeline {
       }
     }
   }
-}
-
-// ============================================
-// Helper Functions
-// ============================================
-
-def sendSlackNotification(String buildStatus) {
-    def colorCode = buildStatus == 'SUCCESSFUL' ? 'good' : (buildStatus == 'FAILED' ? 'danger' : 'warning')
-    def emoji = buildStatus == 'SUCCESSFUL' ? '✅' : '❌'
-    
-    // Only send if Slack integration is configured
-    try {
-        slackSend(
-            color: colorCode,
-            message: """
-${emoji} *CineVision Build ${buildStatus}*
-*Job:* ${env.JOB_NAME}
-*Build:* <${env.BUILD_URL}|#${env.BUILD_NUMBER}>
-*Environment:* ${env.TARGET_ENV}
-*Node:* ${env.NODE_NAME}
-*Commit:* <https://github.com/${env.GITHUB_REPO}/commit/${env.GIT_COMMIT}|${env.GIT_COMMIT_SHORT}>
-*Services:* ${env.CHANGED_SERVICES ?: 'None'}
-            """.trim()
-        )
-    } catch(Exception e) {
-        echo "Slack notification failed: ${e.message}"
-    }
 }
