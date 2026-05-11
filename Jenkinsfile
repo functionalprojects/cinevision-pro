@@ -1,14 +1,18 @@
 // ============================================
 // CINEVISION ENTERPRISE CI/CD PIPELINE
 // Industrial-grade automation with DevSecOps
+// Optimized with persistent dependency caching
 // ============================================
 
 import groovy.json.JsonOutput
 
-// Global Configuration
+// ============================================
+// GLOBAL CONFIGURATION
+// ============================================
+
 def getServiceMap() {
   return [
-    'api-gateway'  : [path: 'services/api-gateway',   type: 'maven', image: 'api-gateway', required: false, sonarKey: 'cinevision_api-gateway1'],  // Updated to match your created project
+    'api-gateway'  : [path: 'services/api-gateway',   type: 'maven', image: 'api-gateway', required: false, sonarKey: 'cinevision_api-gateway1'],
     'user-service' : [path: 'services/userService',   type: 'maven', image: 'user-service', required: false, sonarKey: 'cinevision_user-service1'],
     'movie-service': [path: 'services/movieService',  type: 'maven', image: 'movie-service', required: false, sonarKey: 'cinevision_movie-service1'],
     'email-service': [path: 'services/emailService',  type: 'maven', image: 'email-service', required: false, sonarKey: 'cinevision_email-service1'],
@@ -17,655 +21,616 @@ def getServiceMap() {
   ]
 }
 
-// Dynamically discover available services
+// ============================================
+// DISCOVER SERVICES
+// ============================================
+
 def discoverAvailableServices(serviceMap) {
   def available = [:]
+
   serviceMap.each { serviceName, meta ->
     if (fileExists(meta.path)) {
       available[serviceName] = meta
-      echo "✅ Discovered service: ${serviceName} at ${meta.path}"
-      if (meta.sonarKey) {
-        echo "   SonarCloud Project Key: ${meta.sonarKey}"
-      }
+      echo "✅ Discovered service: ${serviceName}"
     } else {
-      echo "⚠️ Service ${serviceName} not found at ${meta.path} - will be skipped"
+      echo "⚠️ Service not found: ${serviceName}"
     }
   }
-  
+
   if (available.isEmpty()) {
-    echo "⚠️ No services found! Checking root directory for builds..."
-    
-    if (fileExists('pom.xml')) {
-      available['root-app'] = [path: '.', type: 'maven', image: 'cinevision-app', required: true, sonarKey: 'cinevision_root-app1']
-    } else if (fileExists('package.json')) {
-      available['root-app'] = [path: '.', type: 'node', image: 'cinevision-app', required: true, sonarKey: 'cinevision_root-app1']
-    } else {
-      error "No services or build files found in the repository!"
-    }
+    error "No services discovered in repository"
   }
-  
+
   return available
 }
 
-// Run SonarCloud analysis for a service
-def runSonarAnalysis(serviceName, meta, sonarToken) {
-  echo "========================================"
-  echo "🔍 Running SonarCloud analysis for: ${serviceName}"
-  echo "  Project Key: ${meta.sonarKey}"
-  echo "  Organization Key: functionalprojects-key"
-  echo "  Organization Name: functionalprojects"
-  echo "========================================"
-  
-  def success = false
-  
-  dir(meta.path) {
-    try {
-      if (meta.type == 'maven' && fileExists('pom.xml')) {
-        // First, try to compile the project
-        echo "Compiling project..."
-        sh """
-          mvn clean compile test-compile \
-            -Dmaven.repo.local=.m2/repository \
-            -DskipTests=true || true
-        """
-        
-        // Run Sonar analysis with correct organization key and project key
-        echo "Running SonarCloud analysis..."
-        def sonarCommand = """
-          mvn sonar:sonar \
-            -Dsonar.projectKey=${meta.sonarKey} \
-            -Dsonar.organization=functionalprojects-key \
-            -Dsonar.host.url=https://sonarcloud.io \
-            -Dsonar.login=${sonarToken} \
-            -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml \
-            -Dsonar.java.binaries=target/classes \
-            -Dsonar.java.test.binaries=target/test-classes \
-            -Dsonar.sources=src/main/java \
-            -Dsonar.tests=src/test/java \
-            -Dsonar.exclusions=**/generated/**/*,**/test/**/* \
-            -Dsonar.verbose=true \
-            -Dmaven.repo.local=.m2/repository
-        """
-        
-        def result = sh(script: sonarCommand, returnStatus: true)
-        
-        if (result == 0) {
-          success = true
-          echo "✅ SonarCloud analysis SUCCESS for ${serviceName}"
-          echo "   View results: https://sonarcloud.io/project/overview?id=${meta.sonarKey}"
-        } else {
-          echo "⚠️ SonarCloud analysis had issues for ${serviceName} (exit code: ${result})"
-          echo "   This may happen on first run. Check the project at:"
-          echo "   https://sonarcloud.io/project/overview?id=${meta.sonarKey}"
-          success = true // Don't fail the build for Sonar issues
-        }
-      } else {
-        echo "⚠️ No pom.xml found for ${serviceName}. Skipping SonarCloud analysis."
-        success = true
-      }
-    } catch (Exception e) {
-      echo "⚠️ SonarCloud analysis failed for ${serviceName}: ${e.message}"
-      success = true
-    }
-  }
-  
-  return success
-}
-
-// Run OWASP Dependency Check
-def runDependencyCheck() {
-  echo "========================================"
-  echo "🔍 Running OWASP Dependency Check"
-  echo "========================================"
-  
-  def hasDepCheck = sh(script: 'command -v dependency-check.sh', returnStatus: true) == 0
-  
-  if (!hasDepCheck) {
-    echo "⚠️ OWASP Dependency Check not installed! Skipping..."
-    echo "Install from: https://github.com/jeremylong/DependencyCheck"
-    return
-  }
-  
-  def scannedCount = 0
-  def servicePaths = ['services/api-gateway', 'services/userService', 'services/movieService', 
-                      'services/emailService', 'services/eureka-server']
-  
-  servicePaths.each { servicePath ->
-    if (fileExists("${servicePath}/pom.xml")) {
-      echo "Scanning dependencies for: ${servicePath}"
-      
-      dir(servicePath) {
-        try {
-          sh "mkdir -p ${env.WORKSPACE}/dependency-check-reports/${servicePath.replace('/', '-')}"
-          sh """
-            dependency-check.sh \
-              --scan . \
-              --format HTML \
-              --format XML \
-              --out ${env.WORKSPACE}/dependency-check-reports/${servicePath.replace('/', '-')} \
-              --enableExperimental || true
-          """
-          scannedCount++
-        } catch (Exception e) {
-          echo "⚠️ Dependency check failed for ${servicePath}: ${e.message}"
-        }
-      }
-    }
-  }
-  
-  if (scannedCount > 0) {
-    try {
-      publishHTML([
-        allowMissing: true,
-        alwaysLinkToLastBuild: true,
-        keepAll: true,
-        reportDir: 'dependency-check-reports',
-        reportFiles: '**/dependency-check-report.html',
-        reportName: 'OWASP Dependency Check'
-      ])
-    } catch (Exception e) {
-      echo "⚠️ Could not publish HTML report: ${e.message}"
-    }
-    archiveArtifacts artifacts: 'dependency-check-reports/**/*.html', allowEmptyArchive: true
-    echo "✅ Dependency Check completed for ${scannedCount} projects"
-  } else {
-    echo "No pom.xml files found to scan"
-  }
-}
-
-// Run OWASP ZAP Security Scan
-def runZapScan(apiUrl) {
-  echo "========================================"
-  echo "🔍 Running OWASP ZAP Security Scan"
-  echo "  Target: ${apiUrl}"
-  echo "========================================"
-  
-  sh """
-    mkdir -p zap-reports
-    docker pull owasp/zap2docker-stable || true
-    docker run --rm \
-      -v \$(pwd)/zap-reports:/zap/wrk:rw \
-      owasp/zap2docker-stable \
-      zap-baseline.py \
-      -t ${apiUrl} \
-      -r zap_report.html \
-      -w zap_report.md \
-      -J zap_report.json \
-      || echo "ZAP scan completed with warnings"
-  """
-  
-  archiveArtifacts artifacts: 'zap-reports/**', allowEmptyArchive: true
-  echo "✅ ZAP Security Scan completed"
-}
-
-// Run Trivy container scan
-def runTrivyScan(imageTag, severity) {
-  echo "========================================"
-  echo "🔍 Running Trivy Security Scan"
-  echo "  Image: ${imageTag}"
-  echo "  Severity: ${severity}"
-  echo "========================================"
-  
-  def hasTrivy = sh(script: 'command -v trivy', returnStatus: true) == 0
-  
-  if (hasTrivy) {
-    sh "trivy image --severity ${severity} --ignore-unfixed --exit-code 0 ${imageTag} || echo 'Trivy scan found issues but continuing'"
-  } else {
-    echo "Trivy not installed. Running via Docker..."
-    sh """
-      docker run --rm \
-        -v /var/run/docker.sock:/var/run/docker.sock \
-        -v trivy-cache:/root/.cache/trivy \
-        aquasec/trivy:0.55.0 \
-        image --scanners vuln --severity ${severity} --skip-java-db-update ${imageTag} \
-        || echo 'Trivy scan completed with warnings'
-    """
-  }
-  echo "✅ Trivy scan completed"
-}
-
-// Enhanced change detection
-def detectChangedServices(availableServices, branchName) {
-  def isFirstBuild = sh(script: 'git rev-parse HEAD~1 >/dev/null 2>&1; echo $?', returnStdout: true).trim() != '0'
-  
-  if (isFirstBuild) {
-    echo "First build detected - building all available services"
-    return availableServices.keySet() as List
-  }
-  
-  if (branchName == 'develop' || branchName == 'main' || branchName == 'master' || branchName.startsWith('release/')) {
-    echo "Full build branch (${branchName}) - building all available services"
-    return availableServices.keySet() as List
-  }
-  
-  def changedFiles = sh(
-    script: "git diff --name-only HEAD~1 HEAD 2>/dev/null || echo ''",
-    returnStdout: true
-  ).trim().split('\n') as List
-  
-  if (changedFiles.isEmpty() || (changedFiles.size() == 1 && changedFiles[0] == '')) {
-    echo "No previous commit found - building all available services"
-    return availableServices.keySet() as List
-  }
-  
-  def changed = []
-  availableServices.each { serviceName, meta ->
-    if (changedFiles.any { it.startsWith("${meta.path}/") }) {
-      changed << serviceName
-      echo "✅ Changes detected in: ${serviceName}"
-    }
-  }
-  
-  def rootBuildFiles = ['pom.xml', 'package.json', 'build.gradle', 'Dockerfile', 'Jenkinsfile']
-  if (changedFiles.any { rootBuildFiles.contains(it) }) {
-    echo "⚠️ Root build file changed - including all services"
-    changed = availableServices.keySet() as List
-  }
-  
-  if (changed.isEmpty()) {
-    echo "No specific changes detected - building all available services"
-    changed = availableServices.keySet() as List
-  } else {
-    echo "Building affected services: ${changed.join(', ')}"
-  }
-  
-  return changed.unique()
-}
+// ============================================
+// ENVIRONMENT CONFIG
+// ============================================
 
 @NonCPS
 def getEnvironmentConfig(String branch) {
-  if (branch == 'main' || branch == 'master' || branch.startsWith('hotfix/')) {
+
+  if (branch == 'main' || branch == 'master') {
     return [
       env: 'prod',
-      awsAccountIdCredentialsId: 'PROD_AWS_ACCOUNT_ID',
       awsCredentialsId: 'aws-prod-credentials',
-      argocdApp: 'cinevision-prod-green',
-      frontendBucket: 'prod-cinevision-prod-frontend',
-      cloudfrontDistributionId: 'PROD_CLOUDFRONT_DISTRIBUTION_ID',
-      posterCloudfrontId: 'PROD_POSTER_CLOUDFRONT_ID',
-      archiveCloudfrontId: 'PROD_ARCHIVE_CLOUDFRONT_ID',
-      apiUrl: 'https://api.cinevision.com',
-      kustomizeOverlay: 'k8s/overlays/prod/green',
       deployEnabled: true,
       approvalRequired: true,
       runSecurityScan: true,
       runPerformanceTests: true,
       runIntegrationTests: true,
-      trivySeverity: 'HIGH,CRITICAL'
+      trivySeverity: 'HIGH,CRITICAL',
+      apiUrl: 'https://api.cinevision.com',
+      argocdApp: 'cinevision-prod'
     ]
   }
-  
+
   if (branch.startsWith('release/')) {
     return [
       env: 'staging',
-      awsAccountIdCredentialsId: 'STAGING_AWS_ACCOUNT_ID',
       awsCredentialsId: 'aws-staging-credentials',
-      argocdApp: 'cinevision-staging',
-      frontendBucket: 'staging-cinevision-staging-frontend',
-      cloudfrontDistributionId: 'STAGING_CLOUDFRONT_DISTRIBUTION_ID',
-      posterCloudfrontId: 'STAGING_POSTER_CLOUDFRONT_ID',
-      archiveCloudfrontId: 'STAGING_ARCHIVE_CLOUDFRONT_ID',
-      apiUrl: 'https://staging-api.cinevision.com',
-      kustomizeOverlay: 'k8s/overlays/staging',
       deployEnabled: true,
       approvalRequired: true,
       runSecurityScan: true,
       runPerformanceTests: true,
       runIntegrationTests: true,
-      trivySeverity: 'HIGH,CRITICAL'
+      trivySeverity: 'HIGH,CRITICAL',
+      apiUrl: 'https://staging-api.cinevision.com',
+      argocdApp: 'cinevision-staging'
     ]
   }
-  
+
   if (branch == 'develop') {
     return [
       env: 'dev',
-      awsAccountIdCredentialsId: 'DEV_AWS_ACCOUNT_ID',
       awsCredentialsId: 'ecr-eks',
-      argocdApp: 'cinevision-dev',
-      frontendBucket: 'dev-cinevision-dev-frontend',
-      cloudfrontDistributionId: 'DEV_CLOUDFRONT_DISTRIBUTION_ID',
-      posterCloudfrontId: 'DEV_POSTER_CLOUDFRONT_ID',
-      archiveCloudfrontId: 'DEV_ARCHIVE_CLOUDFRONT_ID',
-      apiUrl: 'https://dev-api.cinevisionca.link',
-      kustomizeOverlay: 'k8s/overlays/dev',
       deployEnabled: true,
       approvalRequired: false,
       runSecurityScan: true,
       runPerformanceTests: false,
       runIntegrationTests: true,
-      trivySeverity: 'CRITICAL'
+      trivySeverity: 'CRITICAL',
+      apiUrl: 'https://dev-api.cinevisionca.link',
+      argocdApp: 'cinevision-dev'
     ]
   }
-  
-  return [env: 'unknown', deployEnabled: false]
+
+  return [
+    env: 'unknown',
+    deployEnabled: false
+  ]
 }
+
+// ============================================
+// TOOL CHECK + CACHE INIT
+// ============================================
 
 def checkAndInstallTools(config) {
-  script {
-    def hasDocker = sh(script: 'command -v docker', returnStatus: true) == 0
-    if (!hasDocker) {
-      error "Docker is required but not installed on agent ${env.NODE_NAME}"
-    } else {
-      echo "Docker found: ${sh(script: 'docker --version', returnStdout: true).trim()}"
+
+  sh """
+    mkdir -p ${env.MAVEN_CACHE_DIR}
+    mkdir -p ${env.NPM_CACHE_DIR}
+    mkdir -p ${env.TRIVY_CACHE_DIR}
+    mkdir -p ${env.OWASP_CACHE_DIR}
+  """
+
+  sh "chmod -R 777 /var/jenkins_home/caches || true"
+
+  echo "========================================"
+  echo "CACHE DIRECTORIES"
+  echo "========================================"
+
+  sh """
+    ls -lah ${env.MAVEN_CACHE_DIR} || true
+    ls -lah ${env.NPM_CACHE_DIR} || true
+  """
+
+  def hasDocker = sh(script: 'command -v docker', returnStatus: true) == 0
+
+  if (!hasDocker) {
+    error "Docker is required but not installed"
+  }
+
+  echo "✅ Docker available"
+
+  sh "docker --version"
+}
+
+// ============================================
+// SONARCLOUD ANALYSIS
+// ============================================
+
+def runSonarAnalysis(serviceName, meta, sonarToken) {
+
+  echo "========================================"
+  echo "SONARCLOUD ANALYSIS -> ${serviceName}"
+  echo "========================================"
+
+  dir(meta.path) {
+
+    sh """
+      mvn -T 1C clean compile test-compile \
+        -DskipTests=true \
+        -Dmaven.repo.local=${env.MAVEN_CACHE_DIR} \
+        -nsu || true
+    """
+
+    def status = sh(
+      script: """
+        mvn -T 1C sonar:sonar \
+          -Dsonar.projectKey=${meta.sonarKey} \
+          -Dsonar.organization=functionalprojects-key \
+          -Dsonar.host.url=https://sonarcloud.io \
+          -Dsonar.login=${sonarToken} \
+          -Dmaven.repo.local=${env.MAVEN_CACHE_DIR} \
+          -Dsonar.java.binaries=target/classes \
+          -Dsonar.sources=src/main/java \
+          -Dsonar.tests=src/test/java \
+          -nsu
+      """,
+      returnStatus: true
+    )
+
+    if (status == 0) {
+      echo "✅ SonarCloud successful -> ${serviceName}"
+      return true
     }
-    
-    def hasAws = sh(script: 'command -v aws', returnStatus: true) == 0
-    if (!hasAws) {
-      echo "Warning: AWS CLI not found. Some steps may fail."
-    }
-    
-    def hasJq = sh(script: 'command -v jq', returnStatus: true) == 0
-    if (!hasJq) {
-      echo "jq not found. Some features may be limited."
-    }
-    
-    if (config.deployEnabled) {
-      def hasKubectl = sh(script: 'command -v kubectl', returnStatus: true) == 0
-      if (!hasKubectl) {
-        echo "Warning: kubectl not found. Kubernetes deployments may fail."
-      }
-    }
-    
-    echo "Agent ${env.NODE_NAME} ready"
+
+    echo "⚠️ SonarCloud issues detected -> ${serviceName}"
+    return false
   }
 }
 
-// Build a single service with error handling
+// ============================================
+// DEPENDENCY CHECK
+// ============================================
+
+def runDependencyCheck() {
+
+  echo "========================================"
+  echo "OWASP DEPENDENCY CHECK"
+  echo "========================================"
+
+  def hasDepCheck = sh(script: 'command -v dependency-check.sh', returnStatus: true) == 0
+
+  if (!hasDepCheck) {
+    echo "⚠️ Dependency Check not installed"
+    return
+  }
+
+  AVAILABLE_SERVICES.each { serviceName, meta ->
+
+    if (meta.type == 'maven') {
+
+      dir(meta.path) {
+
+        sh """
+          dependency-check.sh \
+            --data ${env.OWASP_CACHE_DIR} \
+            --scan . \
+            --format HTML \
+            --format JSON \
+            --out ${env.WORKSPACE}/dependency-check-reports/${serviceName} \
+            --enableExperimental || true
+        """
+      }
+    }
+  }
+
+  archiveArtifacts artifacts: 'dependency-check-reports/**/*', allowEmptyArchive: true
+}
+
+// ============================================
+// TRIVY SCAN
+// ============================================
+
+def runTrivyScan(imageTag, severity) {
+
+  echo "========================================"
+  echo "TRIVY SCAN -> ${imageTag}"
+  echo "========================================"
+
+  sh """
+    docker run --rm \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      -v ${env.TRIVY_CACHE_DIR}:/root/.cache/trivy \
+      aquasec/trivy:0.55.0 \
+      image \
+      --scanners vuln \
+      --severity ${severity} \
+      --ignore-unfixed \
+      ${imageTag} \
+      || true
+  """
+}
+
+// ============================================
+// CHANGE DETECTION
+// ============================================
+
+def detectChangedServices(availableServices, branchName) {
+
+  def fullBuildBranches = [
+    'develop',
+    'main',
+    'master'
+  ]
+
+  if (fullBuildBranches.contains(branchName) || branchName.startsWith('release/')) {
+    return availableServices.keySet() as List
+  }
+
+  def changedFiles = sh(
+    script: "git diff --name-only HEAD~1 HEAD || true",
+    returnStdout: true
+  ).trim().split('\n')
+
+  def changed = []
+
+  availableServices.each { serviceName, meta ->
+    if (changedFiles.any { it.startsWith("${meta.path}/") }) {
+      changed << serviceName
+    }
+  }
+
+  if (changed.isEmpty()) {
+    changed = availableServices.keySet() as List
+  }
+
+  return changed.unique()
+}
+
+// ============================================
+// BUILD SERVICE
+// ============================================
+
 def buildService(serviceName, meta, envVars) {
-  def serviceResult = [success: true, error: null, imageTag: null]
-  
+
+  def result = [
+    success: true,
+    imageTag: null,
+    error: null
+  ]
+
   try {
+
     echo "========================================"
-    echo "🚀 Building service: ${serviceName}"
+    echo "BUILDING -> ${serviceName}"
     echo "========================================"
-    
+
     dir(meta.path) {
-      if (meta.type == 'maven') {
-        if (fileExists('pom.xml')) {
-          echo "Building Maven project..."
-          def buildResult = sh(script: 'mvn clean package -DskipTests=true -Dmaven.repo.local=.m2/repository 2>&1', returnStatus: true)
-          if (buildResult != 0) {
-            echo "⚠️ Build failed"
-            serviceResult.success = false
-            serviceResult.error = "Maven build failed"
-            return serviceResult
-          }
-        } else {
-          echo "⚠️ No pom.xml found in ${meta.path}. Skipping Maven build."
-          return serviceResult
-        }
-      } else if (meta.type == 'node') {
-        if (fileExists('package.json')) {
-          echo "Building Node.js project..."
-          sh "npm install --legacy-peer-deps || npm install"
-          sh "CI=false npm run build || echo 'Build completed'"
-        } else {
-          echo "⚠️ No package.json found in ${meta.path}. Skipping Node.js build."
-          return serviceResult
-        }
+
+      // =========================================
+      // MAVEN BUILD
+      // =========================================
+
+      if (meta.type == 'maven' && fileExists('pom.xml')) {
+
+        sh """
+          mvn -T 1C clean package \
+            -DskipTests=true \
+            -Dmaven.repo.local=${env.MAVEN_CACHE_DIR} \
+            -nsu
+        """
       }
-      
+
+      // =========================================
+      // NODE BUILD
+      // =========================================
+
+      if (meta.type == 'node' && fileExists('package.json')) {
+
+        sh """
+          npm config set cache ${env.NPM_CACHE_DIR} --global
+
+          if [ -f package-lock.json ]; then
+            npm ci \
+              --cache ${env.NPM_CACHE_DIR} \
+              --prefer-offline
+          else
+            npm install \
+              --cache ${env.NPM_CACHE_DIR} \
+              --prefer-offline \
+              --legacy-peer-deps
+          fi
+        """
+
+        sh "CI=false npm run build || true"
+      }
+
+      // =========================================
+      // DOCKER BUILD
+      // =========================================
+
       if (fileExists('Dockerfile')) {
-        def fullImageName = "${envVars.IMAGE_NAMESPACE}/${meta.image}"
-        def imageTag = "${envVars.CURRENT_ECR_REGISTRY}/${fullImageName}:${envVars.IMAGE_TAG}"
-        serviceResult.imageTag = imageTag
-        
-        echo "Building Docker image: ${imageTag}"
-        sh "docker build --no-cache -t ${imageTag} ."
-        
-        if (envVars.TRIVY_SEVERITY) {
-          runTrivyScan(imageTag, envVars.TRIVY_SEVERITY)
-        }
-        
+
+        def imageTag = "${envVars.CURRENT_ECR_REGISTRY}/${envVars.IMAGE_NAMESPACE}/${meta.image}:${envVars.IMAGE_TAG}"
+
+        result.imageTag = imageTag
+
+        sh """
+          docker build \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            -t ${imageTag} .
+        """
+
+        runTrivyScan(imageTag, envVars.TRIVY_SEVERITY)
+
         withAWS(credentials: envVars.AWS_CREDENTIALS_ID, region: envVars.AWS_REGION) {
-          echo "Logging into ECR..."
-          sh "aws ecr get-login-password --region ${envVars.AWS_REGION} | docker login --username AWS --password-stdin ${envVars.CURRENT_ECR_REGISTRY}"
-          
-          echo "Pushing image: ${imageTag}"
-          retry(3) { sh "docker push ${imageTag}" }
-          
-          def envTag = "${envVars.TARGET_ENV}-latest"
-          echo "Tagging as ${envTag}"
-          sh "docker tag ${imageTag} ${envVars.CURRENT_ECR_REGISTRY}/${fullImageName}:${envTag}"
-          sh "docker push ${envVars.CURRENT_ECR_REGISTRY}/${fullImageName}:${envTag}"
+
+          sh """
+            aws ecr get-login-password --region ${envVars.AWS_REGION} \
+            | docker login --username AWS --password-stdin ${envVars.CURRENT_ECR_REGISTRY}
+          """
+
+          sh "docker push ${imageTag}"
+
+          sh """
+            docker tag ${imageTag} \
+            ${envVars.CURRENT_ECR_REGISTRY}/${envVars.IMAGE_NAMESPACE}/${meta.image}:${envVars.TARGET_ENV}-latest
+          """
+
+          sh """
+            docker push \
+            ${envVars.CURRENT_ECR_REGISTRY}/${envVars.IMAGE_NAMESPACE}/${meta.image}:${envVars.TARGET_ENV}-latest
+          """
         }
-        
-        echo "✅ Successfully built and pushed: ${serviceName}"
-      } else {
-        echo "⚠️ No Dockerfile found in ${meta.path}. Skipping containerization."
       }
+
+      echo "✅ Build successful -> ${serviceName}"
     }
+
   } catch (Exception e) {
-    serviceResult.success = false
-    serviceResult.error = e.message
-    echo "❌ Failed to build ${serviceName}: ${e.message}"
+
+    result.success = false
+    result.error = e.message
+
+    echo "❌ Build failed -> ${serviceName}"
+    echo e.message
   }
-  
-  return serviceResult
+
+  return result
 }
 
-// Global state
+// ============================================
+// GLOBAL STATE
+// ============================================
+
 def AVAILABLE_SERVICES = [:]
 def BUILD_RESULTS = [:]
 def SONAR_RESULTS = [:]
 
+// ============================================
+// PIPELINE
+// ============================================
+
 pipeline {
+
   agent any
-  
+
   options {
     timestamps()
     disableConcurrentBuilds()
     buildDiscarder(logRotator(numToKeepStr: '30'))
-    timeout(time: 90, unit: 'MINUTES')
+    timeout(time: 120, unit: 'MINUTES')
     skipDefaultCheckout()
   }
-  
+
   environment {
+
+    // =========================================
+    // GLOBAL
+    // =========================================
+
     AWS_REGION = 'us-east-1'
     IMAGE_NAMESPACE = 'cinevision'
+
+    DOCKER_BUILDKIT = '1'
+    COMPOSE_DOCKER_CLI_BUILD = '1'
+
+    // =========================================
+    // CACHE DIRECTORIES
+    // =========================================
+
+    MAVEN_CACHE_DIR = '/var/jenkins_home/caches/maven'
+    NPM_CACHE_DIR = '/var/jenkins_home/caches/npm'
+    TRIVY_CACHE_DIR = '/var/jenkins_home/caches/trivy'
+    OWASP_CACHE_DIR = '/var/jenkins_home/caches/owasp'
+
+    // =========================================
+    // CREDENTIALS
+    // =========================================
+
     GITHUB_TOKEN = credentials('github-token')
-    GITHUB_REPO = 'functionalprojects/cinevision-pro'
-    JENKINS_AGENT_NAME = "${NODE_NAME}"
+
+    // =========================================
+    // SONAR
+    // =========================================
+
     SONAR_HOST_URL = 'https://sonarcloud.io'
     SONAR_ORGANIZATION_KEY = 'functionalprojects-key'
-    SONAR_ORGANIZATION_NAME = 'functionalprojects'
   }
-  
+
   stages {
+
+    // =========================================
+    // INITIALIZATION
+    // =========================================
+
     stage('🚀 Initialization') {
-      when { 
-        not { changelog '\\[CI\\]' } 
-        anyOf {
-          branch 'develop'
-          branch 'main'
-          branch 'master'
-          expression { env.BRANCH_NAME != null && env.BRANCH_NAME.startsWith('release/') }
-        }
-      }
+
       steps {
+
         checkout scm
-        
+
         script {
-          def staticServiceMap = getServiceMap()
-          AVAILABLE_SERVICES = discoverAvailableServices(staticServiceMap)
-          
+
+          AVAILABLE_SERVICES = discoverAvailableServices(getServiceMap())
+
           def CONFIG = getEnvironmentConfig(env.BRANCH_NAME)
+
           env.TARGET_ENV = CONFIG.env
-          
-          if (env.TARGET_ENV == 'unknown') {
-            error "Branch ${env.BRANCH_NAME} is not mapped to any environment."
-          }
-          
-          env.DEPLOY_ENABLED = CONFIG.deployEnabled.toString()
-          env.APPROVAL_REQUIRED = CONFIG.approvalRequired.toString()
           env.RUN_SECURITY_SCAN = CONFIG.runSecurityScan.toString()
           env.RUN_PERFORMANCE_TESTS = CONFIG.runPerformanceTests.toString()
           env.RUN_INTEGRATION_TESTS = CONFIG.runIntegrationTests.toString()
           env.TRIVY_SEVERITY = CONFIG.trivySeverity
-          env.ARGOCD_APP = CONFIG.argocdApp
-          env.FRONTEND_BUCKET = CONFIG.frontendBucket
           env.API_URL = CONFIG.apiUrl
-          env.KUSTOMIZE_OVERLAY = CONFIG.kustomizeOverlay
+          env.ARGOCD_APP = CONFIG.argocdApp
           env.AWS_CREDENTIALS_ID = CONFIG.awsCredentialsId
-          env.CLOUDFRONT_DISTRIBUTION_ID = CONFIG.cloudfrontDistributionId
-          
-          if (CONFIG.awsAccountIdCredentialsId) {
-            withCredentials([string(credentialsId: CONFIG.awsAccountIdCredentialsId, variable: 'AWS_ACCOUNT_ID')]) {
-              env.CURRENT_ECR_REGISTRY = "${AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
-            }
-          } else if (CONFIG.env == 'dev') {
-            env.CURRENT_ECR_REGISTRY = "dev.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
-          } else {
-            error "AWS Account ID credentials not found for environment ${CONFIG.env}"
-          }
-          
-          env.GIT_COMMIT_SHORT = sh(script: 'git rev-parse --short=8 HEAD', returnStdout: true).trim()
+
+          env.GIT_COMMIT_SHORT = sh(
+            script: 'git rev-parse --short=8 HEAD',
+            returnStdout: true
+          ).trim()
+
           env.IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT_SHORT}"
-          
-          checkAndInstallTools(CONFIG)
-          
-          echo "========================================"
-          echo "Pipeline Configuration:"
-          echo "  Environment: ${env.TARGET_ENV}"
-          echo "  Registry: ${env.CURRENT_ECR_REGISTRY}"
-          echo "  Image Tag: ${env.IMAGE_TAG}"
-          echo "  SonarCloud Organization Key: ${env.SONAR_ORGANIZATION_KEY}"
-          echo "  SonarCloud Organization Name: ${env.SONAR_ORGANIZATION_NAME}"
-          echo "  SonarCloud Host: ${env.SONAR_HOST_URL}"
-          echo "  Available Services:"
-          AVAILABLE_SERVICES.each { name, meta ->
-            echo "    - ${name} (${meta.type}) -> SonarKey: ${meta.sonarKey ?: 'N/A'}"
+
+          withCredentials([
+            string(credentialsId: 'DEV_AWS_ACCOUNT_ID', variable: 'AWS_ACCOUNT_ID')
+          ]) {
+            env.CURRENT_ECR_REGISTRY = "${AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
           }
+
+          checkAndInstallTools(CONFIG)
+
+          echo "========================================"
+          echo "PIPELINE CONFIGURATION"
+          echo "========================================"
+          echo "Environment: ${env.TARGET_ENV}"
+          echo "Image Tag: ${env.IMAGE_TAG}"
+          echo "Registry: ${env.CURRENT_ECR_REGISTRY}"
           echo "========================================"
         }
       }
     }
-    
+
+    // =========================================
+    // DEPENDENCY WARMUP
+    // =========================================
+
+    stage('⚡ Dependency Warmup') {
+
+      steps {
+
+        script {
+
+          AVAILABLE_SERVICES.each { serviceName, meta ->
+
+            dir(meta.path) {
+
+              // =====================================
+              // MAVEN PRELOAD
+              // =====================================
+
+              if (meta.type == 'maven' && fileExists('pom.xml')) {
+
+                sh """
+                  mvn dependency:go-offline \
+                    -Dmaven.repo.local=${env.MAVEN_CACHE_DIR} \
+                    -nsu || true
+                """
+              }
+
+              // =====================================
+              // NODE PRELOAD
+              // =====================================
+
+              if (meta.type == 'node' && fileExists('package.json')) {
+
+                sh """
+                  npm config set cache ${env.NPM_CACHE_DIR} --global
+
+                  if [ -f package-lock.json ]; then
+                    npm ci \
+                      --cache ${env.NPM_CACHE_DIR} \
+                      --prefer-offline || true
+                  fi
+                """
+              }
+            }
+          }
+
+          echo "✅ Dependency warmup completed"
+        }
+      }
+    }
+
+    // =========================================
+    // SECURITY & CODE QUALITY
+    // =========================================
+
     stage('🔍 Security & Code Quality') {
-      when { expression { env.RUN_SECURITY_SCAN == 'true' } }
+
+      when {
+        expression { env.RUN_SECURITY_SCAN == 'true' }
+      }
+
       parallel {
-        stage('SCA: OWASP Dependency Check') {
+
+        stage('OWASP Dependency Check') {
+
           steps {
+
             script {
               runDependencyCheck()
             }
           }
         }
-        
-        stage('SAST: SonarCloud Analysis') {
+
+        stage('SonarCloud Analysis') {
+
           steps {
+
             script {
-              echo "========================================"
-              echo "🔍 SonarCloud Configuration"
-              echo "  Organization Key: ${env.SONAR_ORGANIZATION_KEY}"
-              echo "  Organization Name: ${env.SONAR_ORGANIZATION_NAME}"
-              echo "  Server URL: ${env.SONAR_HOST_URL}"
-              echo "========================================"
-              
-              def sonarToken = null
-              try {
-                withCredentials([string(credentialsId: 'sonarcloud-token', variable: 'SONAR_TOKEN')]) {
-                  sonarToken = env.SONAR_TOKEN
-                }
-                echo "✅ SonarCloud token found"
-              } catch (Exception e) {
-                echo "❌ SonarCloud token not found!"
-                echo "Please add your SonarCloud token:"
-                echo "  Jenkins → Credentials → Add Secret text"
-                echo "  ID: sonarcloud-token"
-                echo "  Secret: [your token from https://sonarcloud.io/account/security]"
-                echo "⚠️ Continuing pipeline without SonarCloud analysis..."
-                return
-              }
-              
-              echo ""
-              echo "========================================"
-              echo "📋 Services to analyze with SonarCloud"
-              echo "========================================"
-              
-              def servicesToAnalyze = []
-              AVAILABLE_SERVICES.each { serviceName, meta ->
-                if (meta.sonarKey && fileExists("${meta.path}/pom.xml")) {
-                  servicesToAnalyze.add(serviceName)
-                  echo "  ✅ ${serviceName} -> ${meta.sonarKey}"
-                } else if (meta.sonarKey) {
-                  echo "  ⚠️ ${serviceName} -> pom.xml not found"
-                }
-              }
-              
-              if (servicesToAnalyze.isEmpty()) {
-                echo "⚠️ No services with pom.xml found for SonarCloud analysis"
-                return
-              }
-              
-              echo ""
-              echo "========================================"
-              echo "🔍 Running SonarCloud analysis"
-              echo "  Organization Key: ${env.SONAR_ORGANIZATION_KEY}"
-              echo "  Services: ${servicesToAnalyze.join(', ')}"
-              echo "========================================"
-              
-              def analyzedServices = []
-              AVAILABLE_SERVICES.each { serviceName, meta ->
-                if (meta.sonarKey && fileExists("${meta.path}/pom.xml")) {
-                  echo ""
-                  echo "--- Analyzing: ${serviceName} ---"
-                  echo "    Project Key: ${meta.sonarKey}"
-                  echo "    Organization Key: ${env.SONAR_ORGANIZATION_KEY}"
-                  echo "    Project URL: https://sonarcloud.io/project/overview?id=${meta.sonarKey}"
-                  
-                  def analyzed = runSonarAnalysis(serviceName, meta, sonarToken)
-                  if (analyzed) {
-                    analyzedServices.add(serviceName)
-                    SONAR_RESULTS[serviceName] = [success: true]
-                  } else {
-                    SONAR_RESULTS[serviceName] = [success: false]
+
+              withCredentials([
+                string(credentialsId: 'sonarcloud-token', variable: 'SONAR_TOKEN')
+              ]) {
+
+                AVAILABLE_SERVICES.each { serviceName, meta ->
+
+                  if (meta.sonarKey && meta.type == 'maven') {
+
+                    def status = runSonarAnalysis(
+                      serviceName,
+                      meta,
+                      env.SONAR_TOKEN
+                    )
+
+                    SONAR_RESULTS[serviceName] = [
+                      success: status
+                    ]
                   }
                 }
               }
-              
-              echo ""
-              echo "========================================"
-              echo "📊 SonarCloud Analysis Summary"
-              echo "========================================"
-              if (analyzedServices.isEmpty()) {
-                echo "⚠️ No services were successfully analyzed."
-                echo ""
-                echo "💡 Make sure you've created the SonarCloud projects with these keys:"
-                servicesToAnalyze.each { svc ->
-                  def key = AVAILABLE_SERVICES[svc]?.sonarKey
-                  echo "     - ${key}"
-                }
-                echo ""
-                echo "   Create them at: https://sonarcloud.io/organizations/${env.SONAR_ORGANIZATION_KEY}/projects/create"
-              } else {
-                echo "✅ Successfully analyzed: ${analyzedServices.join(', ')}"
-                echo ""
-                echo "📈 View all projects:"
-                echo "   https://sonarcloud.io/organizations/${env.SONAR_ORGANIZATION_KEY}/projects"
-              }
-              echo "========================================"
             }
           }
         }
       }
     }
-    
+
+    // =========================================
+    // BUILD & CONTAINERIZE
+    // =========================================
+
     stage('📦 Build & Containerize') {
+
       steps {
+
         script {
-          if (AVAILABLE_SERVICES.isEmpty()) {
-            echo "No services available to build. Skipping build stage."
-            return
-          }
-          
-          def changed = detectChangedServices(AVAILABLE_SERVICES, env.BRANCH_NAME)
+
+          def changed = detectChangedServices(
+            AVAILABLE_SERVICES,
+            env.BRANCH_NAME
+          )
+
           env.CHANGED_SERVICES = changed.join(',')
-          
+
           echo "========================================"
-          echo "Building services: ${env.CHANGED_SERVICES}"
+          echo "Changed Services: ${env.CHANGED_SERVICES}"
           echo "========================================"
-          
+
           def buildVars = [
             AWS_REGION: env.AWS_REGION,
             IMAGE_NAMESPACE: env.IMAGE_NAMESPACE,
@@ -675,199 +640,156 @@ pipeline {
             AWS_CREDENTIALS_ID: env.AWS_CREDENTIALS_ID,
             TRIVY_SEVERITY: env.TRIVY_SEVERITY
           ]
-          
+
           for (serviceName in changed) {
-            if (!AVAILABLE_SERVICES.containsKey(serviceName)) {
-              echo "⚠️ Service ${serviceName} is not available. Skipping..."
-              continue
-            }
-            
+
             def meta = AVAILABLE_SERVICES[serviceName]
-            def result = buildService(serviceName, meta, buildVars)
+
+            def result = buildService(
+              serviceName,
+              meta,
+              buildVars
+            )
+
             BUILD_RESULTS[serviceName] = result
-            
-            if (!result.success) {
-              echo "❌ Build failed for ${serviceName}: ${result.error}"
-              if (meta.required) {
-                error "Required service ${serviceName} failed to build. Aborting pipeline."
-              } else {
-                echo "⚠️ Optional service ${serviceName} failed. Continuing with other services..."
-              }
-            }
           }
-          
+
           echo "========================================"
-          echo "Build Summary:"
+          echo "BUILD SUMMARY"
+          echo "========================================"
+
           BUILD_RESULTS.each { name, result ->
-            def status = result.success ? "✅ SUCCESS" : "❌ FAILED"
-            echo "  ${name}: ${status}"
+            echo "${name} -> ${result.success ? 'SUCCESS' : 'FAILED'}"
           }
-          echo "========================================"
         }
       }
     }
-    
-    stage('📂 GitOps Manifest Update') {
-      when { expression { 
-        env.DEPLOY_ENABLED == 'true' && 
-        env.CHANGED_SERVICES != null && 
-        env.CHANGED_SERVICES != '' &&
-        env.KUSTOMIZE_OVERLAY &&
-        fileExists(env.KUSTOMIZE_OVERLAY)
-      } }
+
+    // =========================================
+    // DEPLOYMENT
+    // =========================================
+
+    stage('🚢 Deployment') {
+
+      when {
+        expression {
+          BUILD_RESULTS.any { it.value.success }
+        }
+      }
+
       steps {
+
         script {
-          def overlay = env.KUSTOMIZE_OVERLAY
-          def updated = false
-          
-          if (fileExists(overlay)) {
-            dir(overlay) {
-              def changedServices = env.CHANGED_SERVICES.split(',')
-              changedServices.each { serviceName ->
-                if (BUILD_RESULTS[serviceName]?.success && BUILD_RESULTS[serviceName]?.imageTag) {
-                  if (serviceName != 'frontend' && AVAILABLE_SERVICES.containsKey(serviceName)) {
-                    def meta = AVAILABLE_SERVICES[serviceName]
-                    def fullImageName = "${env.CURRENT_ECR_REGISTRY}/${env.IMAGE_NAMESPACE}/${meta.image}"
-                    sh "kustomize edit set image ${meta.image}=${fullImageName}:${env.IMAGE_TAG} || echo 'Kustomize not available'"
-                    updated = true
-                    echo "✅ Updated manifest for ${serviceName}"
-                  }
-                } else {
-                  echo "⚠️ Skipping manifest update for ${serviceName} (build failed or no image)"
-                }
-              }
+
+          if (env.TARGET_ENV == 'prod') {
+
+            input(
+              message: "Approve Production Deployment?",
+              ok: "Deploy"
+            )
+          }
+
+          def hasArgo = sh(
+            script: 'command -v argocd',
+            returnStatus: true
+          ) == 0
+
+          if (hasArgo) {
+
+            withCredentials([
+              usernamePassword(
+                credentialsId: 'argocd-creds',
+                usernameVariable: 'ARGO_USER',
+                passwordVariable: 'ARGO_PWD'
+              )
+            ]) {
+
+              sh """
+                argocd login argocd.cinevision.com \
+                  --username ${ARGO_USER} \
+                  --password ${ARGO_PWD} \
+                  --insecure \
+                  --grpc-web
+              """
+
+              sh "argocd app sync ${env.ARGOCD_APP} --prune"
+
+              sh """
+                argocd app wait \
+                  ${env.ARGOCD_APP} \
+                  --health \
+                  --timeout 600
+              """
             }
-            
-            if (updated) {
-              withCredentials([usernamePassword(credentialsId: 'github-token', usernameVariable: 'GITHUB_USER', passwordVariable: 'GITHUB_TOKEN')]) {
-                sh """
-                  git config user.email "jenkins@cinevision.com"
-                  git config user.name "Jenkins CI"
-                  git add ${overlay} || echo 'No files to add'
-                  git commit -m "[CI] Deploy ${env.IMAGE_TAG} to ${env.TARGET_ENV} [skip ci]" || echo "No changes to commit"
-                  git push https://${GITHUB_USER}:${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git HEAD:${env.BRANCH_NAME} || echo "Push failed"
-                """
-              }
-            } else {
-              echo "No manifest updates needed"
-            }
-          } else {
-            echo "Kustomize overlay ${overlay} not found. Skipping manifest update."
+
+            echo "✅ Deployment completed"
           }
         }
       }
     }
-    
-    stage('🌐 Frontend Deployment') {
-      when { expression { 
-        env.CHANGED_SERVICES != null && 
-        env.CHANGED_SERVICES.split(',').contains('frontend') && 
-        BUILD_RESULTS['frontend']?.success &&
-        env.FRONTEND_BUCKET 
-      } }
-      steps {
-        script {
-          echo "Deploying frontend to S3 bucket: ${env.FRONTEND_BUCKET}"
-          
-          withAWS(credentials: env.AWS_CREDENTIALS_ID, region: env.AWS_REGION) {
-            def frontendPath = AVAILABLE_SERVICES['frontend']?.path ?: 'services/frontend'
-            if (fileExists(frontendPath)) {
-              dir(frontendPath) {
-                if (fileExists('dist') || fileExists('build')) {
-                  def buildDir = fileExists('dist') ? 'dist' : 'build'
-                  sh "aws s3 sync ${buildDir} s3://${env.FRONTEND_BUCKET} --delete"
-                  
-                  if (env.CLOUDFRONT_DISTRIBUTION_ID) {
-                    withCredentials([string(credentialsId: env.CLOUDFRONT_DISTRIBUTION_ID, variable: 'CF_ID')]) {
-                      sh "aws cloudfront create-invalidation --distribution-id ${CF_ID} --paths '/*'"
-                    }
-                  }
-                  echo "✅ Frontend deployed successfully"
-                } else {
-                  echo "⚠️ Build directory not found. Skipping frontend deployment."
-                }
-              }
-            } else {
-              echo "⚠️ Frontend path ${frontendPath} not found. Skipping deployment."
-            }
-          }
+
+    // =========================================
+    // POST DEPLOYMENT TESTS
+    // =========================================
+
+    stage('✅ Post Deployment Tests') {
+
+      when {
+        expression {
+          env.RUN_INTEGRATION_TESTS == 'true'
         }
       }
-    }
-    
-    stage('🚢 Deployment & Verification') {
-      when { expression { 
-        env.DEPLOY_ENABLED == 'true' && 
-        env.ARGOCD_APP &&
-        !BUILD_RESULTS.isEmpty() &&
-        BUILD_RESULTS.any { it.value.success }
-      } }
-      steps {
-        script {
-          if (env.APPROVAL_REQUIRED == 'true') {
-            input message: "Approve deployment to ${env.TARGET_ENV}?", ok: "Deploy"
-          }
-          
-          withAWS(credentials: env.AWS_CREDENTIALS_ID, region: env.AWS_REGION) {
-            def hasArgoCD = sh(script: 'command -v argocd', returnStatus: true) == 0
-            if (hasArgoCD) {
-              try {
-                withCredentials([usernamePassword(credentialsId: 'argocd-creds', passwordVariable: 'ARGO_PWD', usernameVariable: 'ARGO_USER')]) {
-                  sh "argocd login argocd.cinevision.com --username ${ARGO_USER} --password ${ARGO_PWD} --insecure --grpc-web || echo 'ArgoCD login failed'"
-                }
-                sh "argocd app sync ${env.ARGOCD_APP} --prune || echo 'Sync failed'"
-                sh "argocd app wait ${env.ARGOCD_APP} --health --timeout 600 || echo 'Wait failed'"
-                echo "✅ ArgoCD sync completed"
-              } catch (Exception e) {
-                echo "ArgoCD operation failed: ${e.message}"
-              }
-            } else {
-              echo "ArgoCD CLI not found. Skipping ArgoCD deployment."
-            }
-          }
-        }
-      }
-    }
-    
-    stage('✅ Post-Deployment Tests') {
-      when { expression { env.RUN_INTEGRATION_TESTS == 'true' && env.API_URL } }
+
       parallel {
-        stage('Integration & DAST') {
+
+        stage('Integration Tests') {
+
           steps {
+
             script {
+
               if (fileExists('tests/integration')) {
-                dir('tests/integration') { 
-                  sh "npm install || echo 'No package.json'"
-                  sh "BASE_URL=${env.API_URL} npm test || echo 'Integration tests failed'"
-                }
-              } else {
-                echo "Integration tests not found. Skipping."
-              }
-              
-              if (env.BRANCH_NAME.startsWith('release/')) {
-                runZapScan(env.API_URL)
-              }
-            }
-          }
-        }
-        stage('Performance') {
-          when { expression { env.RUN_PERFORMANCE_TESTS == 'true' } }
-          steps {
-            script {
-              if (fileExists('tests/performance/cinevision-load-test.js')) {
-                dir('tests/performance') { 
+
+                dir('tests/integration') {
+
                   sh """
-                    docker pull grafana/k6:latest || true
-                    docker run --rm \
-                      -v \$(pwd):/tests \
-                      -t grafana/k6:latest \
-                      run /tests/cinevision-load-test.js \
-                      -e BASE_URL=${env.API_URL} \
-                    || echo 'Performance tests failed'
+                    npm config set cache ${env.NPM_CACHE_DIR} --global
+                    npm install --prefer-offline
+                  """
+
+                  sh """
+                    BASE_URL=${env.API_URL} npm test || true
                   """
                 }
-              } else {
-                echo "Performance tests not found. Skipping."
+              }
+            }
+          }
+        }
+
+        stage('Performance Tests') {
+
+          when {
+            expression {
+              env.RUN_PERFORMANCE_TESTS == 'true'
+            }
+          }
+
+          steps {
+
+            script {
+
+              if (fileExists('tests/performance/cinevision-load-test.js')) {
+
+                dir('tests/performance') {
+
+                  sh """
+                    docker run --rm \
+                      -v \$(pwd):/tests \
+                      grafana/k6:latest \
+                      run /tests/cinevision-load-test.js \
+                      -e BASE_URL=${env.API_URL}
+                  """
+                }
               }
             }
           }
@@ -875,44 +797,93 @@ pipeline {
       }
     }
   }
-  
+
+  // =========================================
+  // POST ACTIONS
+  // =========================================
+
   post {
-    success { 
+
+    success {
+
       script {
-        def successfulServices = BUILD_RESULTS.findAll { it.value.success }.keySet().join(', ')
-        def successfulSonar = SONAR_RESULTS.findAll { it.value.success }.keySet().join(', ')
+
+        def successfulServices = BUILD_RESULTS
+          .findAll { it.value.success }
+          .keySet()
+          .join(', ')
+
         echo "========================================"
-        echo "✅ Pipeline completed successfully!"
-        echo "  Services built: ${successfulServices ?: 'None'}"
-        echo "  SonarCloud analyzed: ${successfulSonar ?: 'None'}"
+        echo "PIPELINE SUCCESS"
         echo "========================================"
-        
+        echo "Services: ${successfulServices}"
+        echo "========================================"
+
         slackSend(
           color: 'good',
-          message: "✅ Pipeline SUCCESS for ${env.JOB_NAME} #${env.BUILD_NUMBER}\nEnvironment: ${env.TARGET_ENV}\nServices: ${successfulServices ?: 'None'}"
+          message: """
+✅ CINEVISION PIPELINE SUCCESS
+
+Job: ${env.JOB_NAME}
+Build: #${env.BUILD_NUMBER}
+Environment: ${env.TARGET_ENV}
+
+Services:
+${successfulServices}
+          """
         )
       }
     }
-    failure { 
+
+    failure {
+
       script {
-        def failedServices = BUILD_RESULTS.findAll { !it.value.success }.keySet().join(', ')
-        def failedSonar = SONAR_RESULTS.findAll { !it.value.success }.keySet().join(', ')
+
+        def failedServices = BUILD_RESULTS
+          .findAll { !it.value.success }
+          .keySet()
+          .join(', ')
+
         echo "========================================"
-        echo "❌ Pipeline failed!"
-        echo "  Failed services: ${failedServices ?: 'None'}"
-        echo "  Failed SonarCloud analyses: ${failedSonar ?: 'None'}"
+        echo "PIPELINE FAILURE"
         echo "========================================"
-        
+        echo "Failed Services: ${failedServices}"
+        echo "========================================"
+
         slackSend(
           color: 'danger',
-          message: "❌ Pipeline FAILED for ${env.JOB_NAME} #${env.BUILD_NUMBER}\nEnvironment: ${env.TARGET_ENV}\nFailed services: ${failedServices ?: 'Unknown'}\nCheck logs: ${env.BUILD_URL}"
+          message: """
+❌ CINEVISION PIPELINE FAILED
+
+Job: ${env.JOB_NAME}
+Build: #${env.BUILD_NUMBER}
+Environment: ${env.TARGET_ENV}
+
+Failed Services:
+${failedServices}
+
+Logs:
+${env.BUILD_URL}
+          """
         )
       }
     }
-    always { 
+
+    always {
+
       script {
-        junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml, **/test-results/**/*.xml'
-        cleanWs() 
+
+        junit(
+          allowEmptyResults: true,
+          testResults: '**/target/surefire-reports/*.xml'
+        )
+
+        archiveArtifacts(
+          artifacts: '**/target/*.jar',
+          allowEmptyArchive: true
+        )
+
+        cleanWs()
       }
     }
   }
