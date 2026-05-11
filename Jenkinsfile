@@ -47,16 +47,12 @@ def discoverAvailableServices(serviceMap) {
   return available
 }
 
-// Create SonarCloud project via API - FIXED VERSION
+// Create SonarCloud project via API - FIXED SYNTAX
 def createSonarCloudProject(sonarKey, serviceName, sonarToken) {
   echo "Creating SonarCloud project: ${sonarKey} (${serviceName})"
   
-  // First check if project exists using Bearer token authentication (correct method)
-  def checkCmd = """
-    curl -s -X GET "https://sonarcloud.io/api/components/search?qualifiers=TRK&q=${sonarKey}" \
-      -H "Authorization: Bearer ${sonarToken}" \
-      2>/dev/null | jq -r '.components[]?.key' | grep -q "^${sonarKey}$" && echo "EXISTS" || echo "NOT_FOUND"
-  """
+  // Using proper string concatenation to avoid Groovy interpolation issues
+  def checkCmd = "curl -s -X GET 'https://sonarcloud.io/api/components/search?qualifiers=TRK&q=${sonarKey}' -H 'Authorization: Bearer ${sonarToken}' 2>/dev/null | jq -r '.components[]?.key' | grep -q '^${sonarKey}\$' && echo 'EXISTS' || echo 'NOT_FOUND'"
   
   def exists = false
   try {
@@ -70,7 +66,7 @@ def createSonarCloudProject(sonarKey, serviceName, sonarToken) {
     echo "⚠️ Could not check if project exists: ${e.message}"
   }
   
-  // Create the project using Bearer token authentication (correct format)
+  // Create the project
   def createCmd = """
     curl -s -X POST "https://sonarcloud.io/api/projects/create" \
       -H "Authorization: Bearer ${sonarToken}" \
@@ -91,7 +87,6 @@ def createSonarCloudProject(sonarKey, serviceName, sonarToken) {
         return true
       } else {
         echo "⚠️ Could not create project: ${response}"
-        // Don't fail the pipeline - continue with analysis
         return true
       }
     }
@@ -99,12 +94,11 @@ def createSonarCloudProject(sonarKey, serviceName, sonarToken) {
     return true
   } catch (Exception e) {
     echo "⚠️ Could not create project ${sonarKey}: ${e.message}"
-    // Don't fail the pipeline - the project might already exist
     return true
   }
 }
 
-// Run SonarCloud analysis for a service - SIMPLIFIED VERSION
+// Run SonarCloud analysis for a service
 def runSonarAnalysis(serviceName, meta, sonarToken) {
   echo "========================================"
   echo "🔍 Running SonarCloud analysis for: ${serviceName}"
@@ -146,7 +140,6 @@ def runSonarAnalysis(serviceName, meta, sonarToken) {
           echo "✅ SonarCloud analysis SUCCESS for ${serviceName} (${meta.sonarKey})"
         } else {
           echo "⚠️ SonarCloud analysis returned exit code ${result} for ${serviceName}"
-          // Don't fail the build for Sonar issues
           success = true
         }
       } else {
@@ -155,7 +148,6 @@ def runSonarAnalysis(serviceName, meta, sonarToken) {
       }
     } catch (Exception e) {
       echo "⚠️ SonarCloud analysis failed for ${serviceName}: ${e.message}"
-      // Don't fail the build - continue with pipeline
       success = true
     }
   }
@@ -163,7 +155,7 @@ def runSonarAnalysis(serviceName, meta, sonarToken) {
   return success
 }
 
-// Run OWASP Dependency Check - FIXED
+// Run OWASP Dependency Check
 def runDependencyCheck() {
   echo "========================================"
   echo "🔍 Running OWASP Dependency Check"
@@ -187,7 +179,6 @@ def runDependencyCheck() {
       
       dir(servicePath) {
         try {
-          // Removed --failOnError as it's not a valid parameter
           sh """
             dependency-check.sh \
               --scan . \
@@ -623,7 +614,6 @@ pipeline {
                 echo "  Jenkins → Credentials → Add Secret text"
                 echo "  ID: sonarcloud-token"
                 echo "  Secret: [your token from https://sonarcloud.io/account/security]"
-                // Don't fail the pipeline - continue without SonarCloud
                 echo "⚠️ Continuing pipeline without SonarCloud analysis..."
                 return
               }
