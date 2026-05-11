@@ -8,11 +8,11 @@ import groovy.json.JsonOutput
 // Global Configuration
 def getServiceMap() {
   return [
-    'api-gateway'  : [path: 'services/api-gateway',   type: 'maven', image: 'api-gateway', required: false, sonarKey: 'cinevision_api-gateway'],
-    'user-service' : [path: 'services/userService',   type: 'maven', image: 'user-service', required: false, sonarKey: 'cinevision_user-service'],
-    'movie-service': [path: 'services/movieService',  type: 'maven', image: 'movie-service', required: false, sonarKey: 'cinevision_movie-service'],
-    'email-service': [path: 'services/emailService',  type: 'maven', image: 'email-service', required: false, sonarKey: 'cinevision_email-service'],
-    'eureka-server': [path: 'services/eureka-server', type: 'maven', image: 'eureka-server', required: false, sonarKey: 'cinevision_eureka-server'],
+    'api-gateway'  : [path: 'services/api-gateway',   type: 'maven', image: 'api-gateway', required: false, sonarKey: 'cinevision_api-gateway1'],  // Updated to match your created project
+    'user-service' : [path: 'services/userService',   type: 'maven', image: 'user-service', required: false, sonarKey: 'cinevision_user-service1'],
+    'movie-service': [path: 'services/movieService',  type: 'maven', image: 'movie-service', required: false, sonarKey: 'cinevision_movie-service1'],
+    'email-service': [path: 'services/emailService',  type: 'maven', image: 'email-service', required: false, sonarKey: 'cinevision_email-service1'],
+    'eureka-server': [path: 'services/eureka-server', type: 'maven', image: 'eureka-server', required: false, sonarKey: 'cinevision_eureka-server1'],
     'frontend'     : [path: 'services/frontend',      type: 'node',  image: 'frontend', required: false, sonarKey: null]
   ]
 }
@@ -36,9 +36,9 @@ def discoverAvailableServices(serviceMap) {
     echo "⚠️ No services found! Checking root directory for builds..."
     
     if (fileExists('pom.xml')) {
-      available['root-app'] = [path: '.', type: 'maven', image: 'cinevision-app', required: true, sonarKey: 'cinevision_root-app']
+      available['root-app'] = [path: '.', type: 'maven', image: 'cinevision-app', required: true, sonarKey: 'cinevision_root-app1']
     } else if (fileExists('package.json')) {
-      available['root-app'] = [path: '.', type: 'node', image: 'cinevision-app', required: true, sonarKey: 'cinevision_root-app']
+      available['root-app'] = [path: '.', type: 'node', image: 'cinevision-app', required: true, sonarKey: 'cinevision_root-app1']
     } else {
       error "No services or build files found in the repository!"
     }
@@ -47,7 +47,7 @@ def discoverAvailableServices(serviceMap) {
   return available
 }
 
-// Run SonarCloud analysis for a service - Simplified version
+// Run SonarCloud analysis for a service
 def runSonarAnalysis(serviceName, meta, sonarToken) {
   echo "========================================"
   echo "🔍 Running SonarCloud analysis for: ${serviceName}"
@@ -69,7 +69,7 @@ def runSonarAnalysis(serviceName, meta, sonarToken) {
             -DskipTests=true || true
         """
         
-        // Run Sonar analysis with correct organization key
+        // Run Sonar analysis with correct organization key and project key
         echo "Running SonarCloud analysis..."
         def sonarCommand = """
           mvn sonar:sonar \
@@ -83,7 +83,7 @@ def runSonarAnalysis(serviceName, meta, sonarToken) {
             -Dsonar.sources=src/main/java \
             -Dsonar.tests=src/test/java \
             -Dsonar.exclusions=**/generated/**/*,**/test/**/* \
-            -Dsonar.verbose=false \
+            -Dsonar.verbose=true \
             -Dmaven.repo.local=.m2/repository
         """
         
@@ -95,8 +95,9 @@ def runSonarAnalysis(serviceName, meta, sonarToken) {
           echo "   View results: https://sonarcloud.io/project/overview?id=${meta.sonarKey}"
         } else {
           echo "⚠️ SonarCloud analysis had issues for ${serviceName} (exit code: ${result})"
-          // Don't fail the build for Sonar issues
-          success = true
+          echo "   This may happen on first run. Check the project at:"
+          echo "   https://sonarcloud.io/project/overview?id=${meta.sonarKey}"
+          success = true // Don't fail the build for Sonar issues
         }
       } else {
         echo "⚠️ No pom.xml found for ${serviceName}. Skipping SonarCloud analysis."
@@ -104,7 +105,6 @@ def runSonarAnalysis(serviceName, meta, sonarToken) {
       }
     } catch (Exception e) {
       echo "⚠️ SonarCloud analysis failed for ${serviceName}: ${e.message}"
-      // Don't fail the build - continue with pipeline
       success = true
     }
   }
@@ -136,7 +136,6 @@ def runDependencyCheck() {
       
       dir(servicePath) {
         try {
-          // Create output directory
           sh "mkdir -p ${env.WORKSPACE}/dependency-check-reports/${servicePath.replace('/', '-')}"
           sh """
             dependency-check.sh \
@@ -414,7 +413,6 @@ def buildService(serviceName, meta, envVars) {
         echo "Building Docker image: ${imageTag}"
         sh "docker build --no-cache -t ${imageTag} ."
         
-        // Run Trivy scan
         if (envVars.TRIVY_SEVERITY) {
           runTrivyScan(imageTag, envVars.TRIVY_SEVERITY)
         }
@@ -564,7 +562,6 @@ pipeline {
               echo "  Server URL: ${env.SONAR_HOST_URL}"
               echo "========================================"
               
-              // Get SonarCloud token from credentials
               def sonarToken = null
               try {
                 withCredentials([string(credentialsId: 'sonarcloud-token', variable: 'SONAR_TOKEN')]) {
@@ -631,13 +628,22 @@ pipeline {
               echo "========================================"
               echo "📊 SonarCloud Analysis Summary"
               echo "========================================"
-              echo "✅ Successfully analyzed: ${analyzedServices.join(', ')}"
-              echo ""
-              echo "📈 View all projects:"
-              echo "   https://sonarcloud.io/organizations/${env.SONAR_ORGANIZATION_KEY}/projects"
-              echo ""
-              echo "💡 Note: If projects don't exist, they will be created automatically on first analysis"
-              echo "   Make sure your SonarCloud token has 'Create Project' permissions"
+              if (analyzedServices.isEmpty()) {
+                echo "⚠️ No services were successfully analyzed."
+                echo ""
+                echo "💡 Make sure you've created the SonarCloud projects with these keys:"
+                servicesToAnalyze.each { svc ->
+                  def key = AVAILABLE_SERVICES[svc]?.sonarKey
+                  echo "     - ${key}"
+                }
+                echo ""
+                echo "   Create them at: https://sonarcloud.io/organizations/${env.SONAR_ORGANIZATION_KEY}/projects/create"
+              } else {
+                echo "✅ Successfully analyzed: ${analyzedServices.join(', ')}"
+                echo ""
+                echo "📈 View all projects:"
+                echo "   https://sonarcloud.io/organizations/${env.SONAR_ORGANIZATION_KEY}/projects"
+              }
               echo "========================================"
             }
           }
@@ -829,7 +835,6 @@ pipeline {
         stage('Integration & DAST') {
           steps {
             script {
-              // Run Integration Tests
               if (fileExists('tests/integration')) {
                 dir('tests/integration') { 
                   sh "npm install || echo 'No package.json'"
@@ -839,7 +844,6 @@ pipeline {
                 echo "Integration tests not found. Skipping."
               }
               
-              // Run OWASP ZAP Security Scan for release branches
               if (env.BRANCH_NAME.startsWith('release/')) {
                 runZapScan(env.API_URL)
               }
