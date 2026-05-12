@@ -366,45 +366,6 @@ jobs:
           sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           sudo chmod +x /usr/local/bin/yq
 
-      - name: Create OpenAPI schemas directory
-        run: |
-          mkdir -p /tmp/kubeconform-schemas
-          mkdir -p /tmp/crd-schemas
-
-      - name: Setup custom CRD schemas for External Secrets Operator
-        run: |
-          # Download External Secrets CRDs
-          curl -L https://raw.githubusercontent.com/external-secrets/external-secrets/main/config/crds/bases/external-secrets.io_clustersecretstores.yaml -o /tmp/crd-schemas/externalsecret-clustersecretstore.yaml
-          curl -L https://raw.githubusercontent.com/external-secrets/external-secrets/main/config/crds/bases/external-secrets.io_secretstores.yaml -o /tmp/crd-schemas/externalsecret-secretstore.yaml
-          curl -L https://raw.githubusercontent.com/external-secrets/external-secrets/main/config/crds/bases/external-secrets.io_externalsecrets.yaml -o /tmp/crd-schemas/externalsecret-externalsecret.yaml
-          curl -L https://raw.githubusercontent.com/external-secrets/external-secrets/main/config/crds/bases/external-secrets.io_pushsecrets.yaml -o /tmp/crd-schemas/externalsecret-pushsecret.yaml
-          
-          echo "✅ Downloaded External Secrets CRDs"
-
-      - name: Setup custom CRD schemas for Istio
-        run: |
-          # Download Istio CRDs
-          curl -L https://raw.githubusercontent.com/istio/istio/master/manifests/charts/base/crds/crd-all.gen.yaml -o /tmp/crd-schemas/istio-crds.yaml
-          
-          echo "✅ Downloaded Istio CRDs"
-
-      - name: Setup custom CRD schemas for ArgoCD
-        run: |
-          # Download ArgoCD CRDs (optional)
-          curl -L https://raw.githubusercontent.com/argoproj/argo-cd/master/manifests/crds/application-crd.yaml -o /tmp/crd-schemas/argocd-application.yaml 2>/dev/null || echo "ArgoCD CRDs not available"
-          curl -L https://raw.githubusercontent.com/argoproj/argo-cd/master/manifests/crds/appproject-crd.yaml -o /tmp/crd-schemas/argocd-appproject.yaml 2>/dev/null || echo "ArgoCD AppProject CRDs not available"
-          
-          echo "✅ Downloaded ArgoCD CRDs (if available)"
-
-      - name: Generate kubeconform schema config
-        run: |
-          cat > /tmp/schema-config.yaml << 'EOF'
-          schema:
-            - "https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json"
-            - "file:///tmp/crd-schemas/{{.ResourceKind}}.yaml"
-          EOF
-          echo "✅ Generated kubeconform schema configuration"
-
       - name: Get changed Kubernetes files
         id: changed-files
         run: |
@@ -450,9 +411,6 @@ jobs:
             "AppProject"
             "Kustomization"
           )
-          
-          # Convert to JSON for jq
-          CUSTOM_RESOURCES_JSON=$(printf '%s\n' "${CUSTOM_RESOURCES[@]}" | jq -R . | jq -s .)
           
           FAILED=0
           VALIDATED=0
@@ -519,7 +477,7 @@ jobs:
               fi
               
               # Run kubeconform validation
-              if kubeconform -strict -summary -verbose /tmp/validate-temp.yaml 2>&1; then
+              if kubeconform -strict -summary /tmp/validate-temp.yaml 2>&1; then
                 echo "  ✅ Valid: $KIND"
                 VALIDATED=$((VALIDATED + 1))
               else
@@ -572,75 +530,202 @@ jobs:
           curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
           sudo mv kustomize /usr/local/bin/
           
-          # Define overlays to validate
-          OVERLAYS=("dev" "staging" "dr" "prod/blue" "prod/green")
-          
+          # Define overlays to validate (only check existing directories)
           VALIDATED_OVERLAYS=0
           FAILED_OVERLAYS=0
           
-          for overlay in "${OVERLAYS[@]}"; do
-            overlay_path="k8s/overlays/$overlay"
-            
+          # Find all overlay directories
+          for overlay_path in k8s/overlays/*/; do
             if [ -d "$overlay_path" ]; then
+              overlay=$(basename "$overlay_path")
+              
               echo ""
               echo "─────────────────────────────────────────"
               echo "📁 Validating overlay: $overlay"
               echo "─────────────────────────────────────────"
               
+              # Create temp file with safe name
+              TEMP_FILE="/tmp/rendered-${overlay}.yaml"
+              
               # Build the overlay with kustomize
-              if kustomize build "$overlay_path" > /tmp/rendered-$overlay.yaml 2>/dev/null; then
+              if kustomize build "$overlay_path" > "$TEMP_FILE" 2>/dev/null; then
                 echo "✅ Successfully rendered $overlay overlay"
                 
-                # Validate each resource in the rendered manifest
+                # Check if file has content
+                if [ ! -s "$TEMP_FILE" ]; then
+                  echo "⚠️ Rendered file is empty - no resources to validate"
+                  VALIDATED_OVERLAYS=$((VALIDATED_OVERLAYS + 1))
+                  continue
+                fi
+                
                 RENDERED_VALID=0
                 RENDERED_SKIPPED=0
+                RENDERED_ERRORS=0
                 
-                # Split rendered manifest
-                csplit -sz /tmp/rendered-$overlay.yaml '/^---$/' '{*}' 2>/dev/null || true
+                # Split rendered manifest using yq
+                DOC_COUNT=$(yq eval '. | length' "$TEMP_FILE" 2>/dev/null || echo "0")
                 
-                for manifest in xx*; do
-                  if [ -f "$manifest" ]; then
-                    KIND=$(yq eval '.kind' "$manifest" 2>/dev/null | tr -d '"')
+                if [ "$DOC_COUNT" -eq 0 ] || [ "$DOC_COUNT" = "0" ]; then
+                  # Try reading as single document
+                  KIND=$(yq eval '.kind' "$TEMP_FILE" 2>/dev/null | tr -d '"')
+                  if [ -n "$KIND" ] && [ "$KIND" != "null" ]; then
+                    DOC_COUNT=1
+                  fi
+                fi
+                
+                if [ "$DOC_COUNT" -gt 0 ] && [ "$DOC_COUNT" != "0" ]; then
+                  for i in $(seq 0 $((DOC_COUNT - 1))); do
+                    KIND=$(yq eval ".[$i].kind" "$TEMP_FILE" 2>/dev/null | tr -d '"')
                     
-                    # Skip kustomization and custom resources
-                    if [[ "$KIND" == "Kustomization" ]] || [[ "$KIND" == "null" ]] || [ -z "$KIND" ]; then
-                      rm -f "$manifest"
+                    if [ -z "$KIND" ] || [ "$KIND" = "null" ]; then
+                      # Try alternate extraction for single document
+                      if [ $DOC_COUNT -eq 1 ]; then
+                        KIND=$(yq eval '.kind' "$TEMP_FILE" 2>/dev/null | tr -d '"')
+                      fi
+                    fi
+                    
+                    if [ -z "$KIND" ] || [ "$KIND" = "null" ]; then
                       continue
                     fi
                     
                     # Check if custom resource
-                    IS_CUSTOM=false
                     case "$KIND" in
-                      ExternalSecret|SecretStore|ClusterSecretStore|PushSecret|DestinationRule|VirtualService|Gateway|PeerAuthentication|AuthorizationPolicy|ServiceEntry|WorkloadEntry|Sidecar|EnvoyFilter|RequestAuthentication|ProxyConfig|WasmPlugin|Telemetry|Application|AppProject)
-                        IS_CUSTOM=true
+                      ExternalSecret|SecretStore|ClusterSecretStore|PushSecret|DestinationRule|VirtualService|Gateway|PeerAuthentication|AuthorizationPolicy|ServiceEntry|WorkloadEntry|Sidecar|EnvoyFilter|RequestAuthentication|ProxyConfig|WasmPlugin|Telemetry|Application|AppProject|Kustomization)
+                        echo "  ℹ️ Skipping rendered custom resource: $KIND"
+                        RENDERED_SKIPPED=$((RENDERED_SKIPPED + 1))
+                        ;;
+                      *)
+                        # Extract single document
+                        if [ $DOC_COUNT -eq 1 ]; then
+                          cp "$TEMP_FILE" /tmp/single.yaml
+                        else
+                          yq eval ".[$i]" "$TEMP_FILE" > /tmp/single.yaml
+                        fi
+                        
+                        if kubeconform -strict -summary /tmp/single.yaml 2>&1; then
+                          RENDERED_VALID=$((RENDERED_VALID + 1))
+                        else
+                          echo "❌ Invalid resource in rendered manifest: $KIND"
+                          RENDERED_ERRORS=$((RENDERED_ERRORS + 1))
+                        fi
+                        rm -f /tmp/single.yaml
                         ;;
                     esac
-                    
-                    if [ "$IS_CUSTOM" = true ]; then
-                      echo "  ℹ️ Skipping rendered custom resource: $KIND"
-                      RENDERED_SKIPPED=$((RENDERED_SKIPPED + 1))
-                    else
-                      if kubeconform -strict -summary "$manifest" 2>&1; then
-                        RENDERED_VALID=$((RENDERED_VALID + 1))
-                      else
-                        echo "❌ Invalid resource in rendered manifest: $KIND"
-                        FAILED_OVERLAYS=$((FAILED_OVERLAYS + 1))
-                      fi
-                    fi
-                    
-                    rm -f "$manifest"
-                  fi
-                done
+                  done
+                else
+                  echo "⚠️ Could not parse rendered manifest"
+                fi
                 
                 echo ""
                 echo "  📊 $overlay overlay summary:"
                 echo "    ✅ Valid resources: $RENDERED_VALID"
                 echo "    ⏭️ Skipped CRDs: $RENDERED_SKIPPED"
-                VALIDATED_OVERLAYS=$((VALIDATED_OVERLAYS + 1))
+                echo "    ❌ Errors: $RENDERED_ERRORS"
+                
+                if [ $RENDERED_ERRORS -gt 0 ]; then
+                  FAILED_OVERLAYS=$((FAILED_OVERLAYS + 1))
+                else
+                  VALIDATED_OVERLAYS=$((VALIDATED_OVERLAYS + 1))
+                fi
               else
                 echo "❌ Failed to render $overlay overlay"
                 FAILED_OVERLAYS=$((FAILED_OVERLAYS + 1))
               fi
+              
+              rm -f "$TEMP_FILE"
+            fi
+          done
+          
+          # Also check for nested overlays (prod/blue, prod/green)
+          for overlay_path in k8s/overlays/prod/*/; do
+            if [ -d "$overlay_path" ]; then
+              overlay=$(basename "$overlay_path")
+              overlay_full="prod/$overlay"
+              
+              echo ""
+              echo "─────────────────────────────────────────"
+              echo "📁 Validating overlay: $overlay_full"
+              echo "─────────────────────────────────────────"
+              
+              TEMP_FILE="/tmp/rendered-${overlay}.yaml"
+              
+              if kustomize build "$overlay_path" > "$TEMP_FILE" 2>/dev/null; then
+                echo "✅ Successfully rendered $overlay_full overlay"
+                
+                if [ ! -s "$TEMP_FILE" ]; then
+                  echo "⚠️ Rendered file is empty - no resources to validate"
+                  VALIDATED_OVERLAYS=$((VALIDATED_OVERLAYS + 1))
+                  continue
+                fi
+                
+                RENDERED_VALID=0
+                RENDERED_SKIPPED=0
+                RENDERED_ERRORS=0
+                
+                DOC_COUNT=$(yq eval '. | length' "$TEMP_FILE" 2>/dev/null || echo "0")
+                
+                if [ "$DOC_COUNT" -eq 0 ] || [ "$DOC_COUNT" = "0" ]; then
+                  KIND=$(yq eval '.kind' "$TEMP_FILE" 2>/dev/null | tr -d '"')
+                  if [ -n "$KIND" ] && [ "$KIND" != "null" ]; then
+                    DOC_COUNT=1
+                  fi
+                fi
+                
+                if [ "$DOC_COUNT" -gt 0 ] && [ "$DOC_COUNT" != "0" ]; then
+                  for i in $(seq 0 $((DOC_COUNT - 1))); do
+                    KIND=$(yq eval ".[$i].kind" "$TEMP_FILE" 2>/dev/null | tr -d '"')
+                    
+                    if [ -z "$KIND" ] || [ "$KIND" = "null" ]; then
+                      if [ $DOC_COUNT -eq 1 ]; then
+                        KIND=$(yq eval '.kind' "$TEMP_FILE" 2>/dev/null | tr -d '"')
+                      fi
+                    fi
+                    
+                    if [ -z "$KIND" ] || [ "$KIND" = "null" ]; then
+                      continue
+                    fi
+                    
+                    case "$KIND" in
+                      ExternalSecret|SecretStore|ClusterSecretStore|PushSecret|DestinationRule|VirtualService|Gateway|PeerAuthentication|AuthorizationPolicy|ServiceEntry|WorkloadEntry|Sidecar|EnvoyFilter|RequestAuthentication|ProxyConfig|WasmPlugin|Telemetry|Application|AppProject|Kustomization)
+                        echo "  ℹ️ Skipping rendered custom resource: $KIND"
+                        RENDERED_SKIPPED=$((RENDERED_SKIPPED + 1))
+                        ;;
+                      *)
+                        if [ $DOC_COUNT -eq 1 ]; then
+                          cp "$TEMP_FILE" /tmp/single.yaml
+                        else
+                          yq eval ".[$i]" "$TEMP_FILE" > /tmp/single.yaml
+                        fi
+                        
+                        if kubeconform -strict -summary /tmp/single.yaml 2>&1; then
+                          RENDERED_VALID=$((RENDERED_VALID + 1))
+                        else
+                          echo "❌ Invalid resource in rendered manifest: $KIND"
+                          RENDERED_ERRORS=$((RENDERED_ERRORS + 1))
+                        fi
+                        rm -f /tmp/single.yaml
+                        ;;
+                    esac
+                  done
+                fi
+                
+                echo ""
+                echo "  📊 $overlay_full overlay summary:"
+                echo "    ✅ Valid resources: $RENDERED_VALID"
+                echo "    ⏭️ Skipped CRDs: $RENDERED_SKIPPED"
+                echo "    ❌ Errors: $RENDERED_ERRORS"
+                
+                if [ $RENDERED_ERRORS -gt 0 ]; then
+                  FAILED_OVERLAYS=$((FAILED_OVERLAYS + 1))
+                else
+                  VALIDATED_OVERLAYS=$((VALIDATED_OVERLAYS + 1))
+                fi
+              else
+                echo "❌ Failed to render $overlay_full overlay"
+                FAILED_OVERLAYS=$((FAILED_OVERLAYS + 1))
+              fi
+              
+              rm -f "$TEMP_FILE"
             fi
           done
           
@@ -668,8 +753,9 @@ jobs:
           
           VALIDATED=0
           SKIPPED=0
+          FAILED=0
           
-          find k8s/base -name "*.yaml" -o -name "*.yml" | while read -r file; do
+          while IFS= read -r file; do
             # Skip kustomization files
             if [[ "$file" == *"kustomization.yaml" ]] || [[ "$file" == *"kustomization.yml" ]]; then
               echo "⏭️ Skipping $file (kustomization)"
@@ -698,9 +784,9 @@ jobs:
               VALIDATED=$((VALIDATED + 1))
             else
               echo "❌ Invalid: $file"
-              exit 1
+              FAILED=$((FAILED + 1))
             fi
-          done
+          done < <(find k8s/base -name "*.yaml" -o -name "*.yml" 2>/dev/null || echo "")
           
           echo ""
           echo "========================================="
@@ -708,6 +794,12 @@ jobs:
           echo "========================================="
           echo "✅ Validated: $VALIDATED"
           echo "⏭️ Skipped (CRDs): $SKIPPED"
+          echo "❌ Failed: $FAILED"
+          
+          if [ $FAILED -gt 0 ]; then
+            echo "❌ Base directory validation failed"
+            exit 1
+          fi
           echo "========================================="
 
       - name: Upload validation reports
@@ -717,51 +809,57 @@ jobs:
           name: k8s-validation-reports-${{ github.run_id }}
           path: |
             /tmp/rendered-*.yaml
-            /tmp/kubeconform-*.log
           retention-days: 7
           if-no-files-found: ignore
 
-      - name: Add PR comment for validation results
-        if: always() && github.event.pull_request.number != null
+      - name: Add PR comment for validation results (optional - may fail without proper permissions)
+        if: always() && github.event.pull_request.number != null && github.token != ''
+        continue-on-error: true
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const fs = require('fs');
-            
-            let comment = `## 🔍 Kubernetes Validation Results\n\n`;
-            comment += `| Check | Status |\n`;
-            comment += `|-------|--------|\n`;
-            comment += `| Validation Run | ✅ Completed |\n`;
-            comment += `| Standard Resources | ✅ Validated |\n`;
-            comment += `| Custom Resources (CRDs) | ⏭️ Skipped (validated by cluster) |\n`;
-            comment += `| Kustomize Overlays | ✅ Validated |\n\n`;
-            comment += `**Note:** Custom resources (ExternalSecret, SecretStore, DestinationRule, VirtualService, Gateway, etc.) are intentionally skipped as they are validated by their respective controllers in the cluster.`;
-            
-            // Find and update existing comment
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-            
-            const existingComment = comments.find(comment => 
-              comment.body.includes('Kubernetes Validation Results')
-            );
-            
-            if (existingComment) {
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: existingComment.id,
-                body: comment,
-              });
-            } else {
-              await github.rest.issues.createComment({
+            try {
+              const fs = require('fs');
+              
+              let comment = `## 🔍 Kubernetes Validation Results\n\n`;
+              comment += `| Check | Status |\n`;
+              comment += `|-------|--------|\n`;
+              comment += `| Validation Run | ✅ Completed |\n`;
+              comment += `| Standard Resources | ✅ Validated |\n`;
+              comment += `| Custom Resources (CRDs) | ⏭️ Skipped (validated by cluster) |\n`;
+              comment += `| Kustomize Overlays | ✅ Validated |\n\n`;
+              comment += `**Note:** Custom resources (ExternalSecret, SecretStore, DestinationRule, VirtualService, Gateway, etc.) are intentionally skipped as they are validated by their respective controllers in the cluster.`;
+              
+              // Find and update existing comment
+              const { data: comments } = await github.rest.issues.listComments({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: context.issue.number,
-                body: comment,
               });
+              
+              const existingComment = comments.find(comment => 
+                comment.body && comment.body.includes('Kubernetes Validation Results')
+              );
+              
+              if (existingComment) {
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: existingComment.id,
+                  body: comment,
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  body: comment,
+                });
+              }
+            } catch (error) {
+              console.log('Could not add PR comment. This may be due to permissions.');
+              console.log(`Error: ${error.message}`);
             }
 
 # =========================================================
