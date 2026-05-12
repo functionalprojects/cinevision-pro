@@ -433,61 +433,88 @@ jobs:
               continue
             fi
             
-            # Split multi-document YAML files
-            DOCUMENT_COUNT=$(yq eval '. | length' "$file" 2>/dev/null || echo "1")
+            # Split multi-document YAML files by counting '---' lines
+            DOC_COUNT=$(grep -c "^---" "$file" 2>/dev/null || echo "0")
+            DOC_COUNT=$((DOC_COUNT + 1))
             
-            for i in $(seq 0 $((DOCUMENT_COUNT - 1))); do
-              # Extract kind from document
-              KIND=$(yq eval ".[$i].kind" "$file" 2>/dev/null | tr -d '"')
+            if [ "$DOC_COUNT" -eq 1 ]; then
+              # Single document - validate directly
+              KIND=$(yq eval '.kind' "$file" 2>/dev/null | tr -d '"' | head -1)
               
-              if [ -z "$KIND" ] || [ "$KIND" = "null" ]; then
-                # Try alternate extraction method for single-document files
-                KIND=$(yq eval '.kind' "$file" 2>/dev/null | tr -d '"')
+              if [ -n "$KIND" ] && [ "$KIND" != "null" ]; then
+                # Check if custom resource
+                IS_CUSTOM=false
+                for cr in "${CUSTOM_RESOURCES[@]}"; do
+                  if [ "$KIND" = "$cr" ]; then
+                    IS_CUSTOM=true
+                    break
+                  fi
+                done
+                
+                if [ "$IS_CUSTOM" = true ]; then
+                  echo "  ℹ️ Skipping validation for custom resource: $KIND"
+                  SKIPPED_CRDS=$((SKIPPED_CRDS + 1))
+                else
+                  echo "  🔍 Validating: $KIND"
+                  if kubeconform -strict -summary "$file" 2>&1; then
+                    echo "  ✅ Valid: $KIND"
+                    VALIDATED=$((VALIDATED + 1))
+                  else
+                    echo "  ❌ Invalid: $KIND"
+                    FAILED=1
+                    ERRORS+=("$file: $KIND validation failed")
+                  fi
+                fi
               fi
+            else
+              # Multi-document - split and validate each
+              echo "  📄 Multi-document YAML with $DOC_COUNT documents"
               
-              if [ -z "$KIND" ] || [ "$KIND" = "null" ]; then
-                echo "⚠️ Could not determine resource kind for document $i"
-                continue
-              fi
+              # Split into separate files
+              csplit -sz "$file" '/^---/' '{*}' 2>/dev/null || true
               
-              # Check if this is a custom resource
-              IS_CUSTOM=false
-              for cr in "${CUSTOM_RESOURCES[@]}"; do
-                if [ "$KIND" = "$cr" ]; then
-                  IS_CUSTOM=true
-                  break
+              doc_num=0
+              for chunk in xx*; do
+                if [ -f "$chunk" ]; then
+                  # Skip empty chunks
+                  if [ ! -s "$chunk" ]; then
+                    rm -f "$chunk"
+                    continue
+                  fi
+                  
+                  KIND=$(yq eval '.kind' "$chunk" 2>/dev/null | tr -d '"' | head -1)
+                  
+                  if [ -n "$KIND" ] && [ "$KIND" != "null" ]; then
+                    # Check if custom resource
+                    IS_CUSTOM=false
+                    for cr in "${CUSTOM_RESOURCES[@]}"; do
+                      if [ "$KIND" = "$cr" ]; then
+                        IS_CUSTOM=true
+                        break
+                      fi
+                    done
+                    
+                    if [ "$IS_CUSTOM" = true ]; then
+                      echo "    ℹ️ Document $doc_num - Skipping custom resource: $KIND"
+                      SKIPPED_CRDS=$((SKIPPED_CRDS + 1))
+                    else
+                      echo "    🔍 Document $doc_num - Validating: $KIND"
+                      if kubeconform -strict -summary "$chunk" 2>&1; then
+                        echo "    ✅ Valid: $KIND"
+                        VALIDATED=$((VALIDATED + 1))
+                      else
+                        echo "    ❌ Invalid: $KIND"
+                        FAILED=1
+                        ERRORS+=("$file: $KIND validation failed")
+                      fi
+                    fi
+                  fi
+                  
+                  rm -f "$chunk"
+                  doc_num=$((doc_num + 1))
                 fi
               done
-              
-              if [ "$IS_CUSTOM" = true ]; then
-                echo "  ℹ️ Skipping schema validation for custom resource: $KIND"
-                echo "  ✅ Custom resource $KIND (will be validated by cluster controller)"
-                SKIPPED_CRDS=$((SKIPPED_CRDS + 1))
-                continue
-              fi
-              
-              # Validate standard Kubernetes resources strictly
-              echo "  🔍 Validating: $KIND"
-              
-              # Extract single document to temp file
-              if [ $DOCUMENT_COUNT -eq 1 ]; then
-                cp "$file" /tmp/validate-temp.yaml
-              else
-                yq eval ".[$i]" "$file" > /tmp/validate-temp.yaml
-              fi
-              
-              # Run kubeconform validation
-              if kubeconform -strict -summary /tmp/validate-temp.yaml 2>&1; then
-                echo "  ✅ Valid: $KIND"
-                VALIDATED=$((VALIDATED + 1))
-              else
-                echo "  ❌ Invalid: $KIND"
-                FAILED=1
-                ERRORS+=("$file: $KIND validation failed")
-              fi
-              
-              rm -f /tmp/validate-temp.yaml
-            done
+            fi
             
           done <<< "${{ steps.changed-files.outputs.changed_files }}"
           
@@ -530,101 +557,77 @@ jobs:
           curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
           sudo mv kustomize /usr/local/bin/
           
-          # Define overlays to validate (only check existing directories)
+          # Define custom resources to skip
+          CUSTOM_RESOURCES="ExternalSecret|SecretStore|ClusterSecretStore|PushSecret|DestinationRule|VirtualService|Gateway|PeerAuthentication|AuthorizationPolicy|ServiceEntry|WorkloadEntry|Sidecar|EnvoyFilter|RequestAuthentication|ProxyConfig|WasmPlugin|Telemetry|Application|AppProject|Kustomization"
+          
           VALIDATED_OVERLAYS=0
           FAILED_OVERLAYS=0
           
-          # Find all overlay directories
+          # Validate top-level overlays
           for overlay_path in k8s/overlays/*/; do
             if [ -d "$overlay_path" ]; then
               overlay=$(basename "$overlay_path")
+              
+              # Skip if it's a directory that contains sub-overlays (like prod)
+              if [ "$overlay" = "prod" ]; then
+                continue
+              fi
               
               echo ""
               echo "─────────────────────────────────────────"
               echo "📁 Validating overlay: $overlay"
               echo "─────────────────────────────────────────"
               
-              # Create temp file with safe name
               TEMP_FILE="/tmp/rendered-${overlay}.yaml"
               
-              # Build the overlay with kustomize
               if kustomize build "$overlay_path" > "$TEMP_FILE" 2>/dev/null; then
-                echo "✅ Successfully rendered $overlay overlay"
-                
-                # Check if file has content
-                if [ ! -s "$TEMP_FILE" ]; then
-                  echo "⚠️ Rendered file is empty - no resources to validate"
-                  VALIDATED_OVERLAYS=$((VALIDATED_OVERLAYS + 1))
-                  continue
-                fi
-                
-                RENDERED_VALID=0
-                RENDERED_SKIPPED=0
-                RENDERED_ERRORS=0
-                
-                # Split rendered manifest using yq
-                DOC_COUNT=$(yq eval '. | length' "$TEMP_FILE" 2>/dev/null || echo "0")
-                
-                if [ "$DOC_COUNT" -eq 0 ] || [ "$DOC_COUNT" = "0" ]; then
-                  # Try reading as single document
-                  KIND=$(yq eval '.kind' "$TEMP_FILE" 2>/dev/null | tr -d '"')
-                  if [ -n "$KIND" ] && [ "$KIND" != "null" ]; then
-                    DOC_COUNT=1
-                  fi
-                fi
-                
-                if [ "$DOC_COUNT" -gt 0 ] && [ "$DOC_COUNT" != "0" ]; then
-                  for i in $(seq 0 $((DOC_COUNT - 1))); do
-                    KIND=$(yq eval ".[$i].kind" "$TEMP_FILE" 2>/dev/null | tr -d '"')
-                    
-                    if [ -z "$KIND" ] || [ "$KIND" = "null" ]; then
-                      # Try alternate extraction for single document
-                      if [ $DOC_COUNT -eq 1 ]; then
-                        KIND=$(yq eval '.kind' "$TEMP_FILE" 2>/dev/null | tr -d '"')
+                if [ -s "$TEMP_FILE" ]; then
+                  echo "✅ Successfully rendered $overlay overlay"
+                  
+                  RENDERED_VALID=0
+                  RENDERED_SKIPPED=0
+                  RENDERED_ERRORS=0
+                  
+                  # Split rendered manifest
+                  csplit -sz "$TEMP_FILE" '/^---/' '{*}' 2>/dev/null || true
+                  
+                  doc_num=0
+                  for chunk in xx*; do
+                    if [ -f "$chunk" ] && [ -s "$chunk" ]; then
+                      KIND=$(yq eval '.kind' "$chunk" 2>/dev/null | tr -d '"' | head -1)
+                      
+                      if [ -n "$KIND" ] && [ "$KIND" != "null" ]; then
+                        if echo "$KIND" | grep -qE "$CUSTOM_RESOURCES"; then
+                          echo "  ℹ️ Document $doc_num - Skipping custom resource: $KIND"
+                          RENDERED_SKIPPED=$((RENDERED_SKIPPED + 1))
+                        else
+                          if kubeconform -strict -summary "$chunk" 2>&1; then
+                            RENDERED_VALID=$((RENDERED_VALID + 1))
+                          else
+                            echo "  ❌ Document $doc_num - Invalid resource: $KIND"
+                            RENDERED_ERRORS=$((RENDERED_ERRORS + 1))
+                          fi
+                        fi
                       fi
+                      
+                      rm -f "$chunk"
+                      doc_num=$((doc_num + 1))
                     fi
-                    
-                    if [ -z "$KIND" ] || [ "$KIND" = "null" ]; then
-                      continue
-                    fi
-                    
-                    # Check if custom resource
-                    case "$KIND" in
-                      ExternalSecret|SecretStore|ClusterSecretStore|PushSecret|DestinationRule|VirtualService|Gateway|PeerAuthentication|AuthorizationPolicy|ServiceEntry|WorkloadEntry|Sidecar|EnvoyFilter|RequestAuthentication|ProxyConfig|WasmPlugin|Telemetry|Application|AppProject|Kustomization)
-                        echo "  ℹ️ Skipping rendered custom resource: $KIND"
-                        RENDERED_SKIPPED=$((RENDERED_SKIPPED + 1))
-                        ;;
-                      *)
-                        # Extract single document
-                        if [ $DOC_COUNT -eq 1 ]; then
-                          cp "$TEMP_FILE" /tmp/single.yaml
-                        else
-                          yq eval ".[$i]" "$TEMP_FILE" > /tmp/single.yaml
-                        fi
-                        
-                        if kubeconform -strict -summary /tmp/single.yaml 2>&1; then
-                          RENDERED_VALID=$((RENDERED_VALID + 1))
-                        else
-                          echo "❌ Invalid resource in rendered manifest: $KIND"
-                          RENDERED_ERRORS=$((RENDERED_ERRORS + 1))
-                        fi
-                        rm -f /tmp/single.yaml
-                        ;;
-                    esac
                   done
+                  
+                  echo ""
+                  echo "  📊 $overlay overlay summary:"
+                  echo "    ✅ Valid resources: $RENDERED_VALID"
+                  echo "    ⏭️ Skipped CRDs: $RENDERED_SKIPPED"
+                  echo "    ❌ Errors: $RENDERED_ERRORS"
+                  
+                  if [ $RENDERED_ERRORS -gt 0 ]; then
+                    FAILED_OVERLAYS=$((FAILED_OVERLAYS + 1))
+                  else
+                    VALIDATED_OVERLAYS=$((VALIDATED_OVERLAYS + 1))
+                  fi
                 else
-                  echo "⚠️ Could not parse rendered manifest"
-                fi
-                
-                echo ""
-                echo "  📊 $overlay overlay summary:"
-                echo "    ✅ Valid resources: $RENDERED_VALID"
-                echo "    ⏭️ Skipped CRDs: $RENDERED_SKIPPED"
-                echo "    ❌ Errors: $RENDERED_ERRORS"
-                
-                if [ $RENDERED_ERRORS -gt 0 ]; then
-                  FAILED_OVERLAYS=$((FAILED_OVERLAYS + 1))
-                else
+                  echo "⚠️ Rendered file is empty - no resources to validate"
                   VALIDATED_OVERLAYS=$((VALIDATED_OVERLAYS + 1))
                 fi
               else
@@ -636,7 +639,7 @@ jobs:
             fi
           done
           
-          # Also check for nested overlays (prod/blue, prod/green)
+          # Validate nested overlays (prod/blue, prod/green)
           for overlay_path in k8s/overlays/prod/*/; do
             if [ -d "$overlay_path" ]; then
               overlay=$(basename "$overlay_path")
@@ -650,74 +653,53 @@ jobs:
               TEMP_FILE="/tmp/rendered-${overlay}.yaml"
               
               if kustomize build "$overlay_path" > "$TEMP_FILE" 2>/dev/null; then
-                echo "✅ Successfully rendered $overlay_full overlay"
-                
-                if [ ! -s "$TEMP_FILE" ]; then
-                  echo "⚠️ Rendered file is empty - no resources to validate"
-                  VALIDATED_OVERLAYS=$((VALIDATED_OVERLAYS + 1))
-                  continue
-                fi
-                
-                RENDERED_VALID=0
-                RENDERED_SKIPPED=0
-                RENDERED_ERRORS=0
-                
-                DOC_COUNT=$(yq eval '. | length' "$TEMP_FILE" 2>/dev/null || echo "0")
-                
-                if [ "$DOC_COUNT" -eq 0 ] || [ "$DOC_COUNT" = "0" ]; then
-                  KIND=$(yq eval '.kind' "$TEMP_FILE" 2>/dev/null | tr -d '"')
-                  if [ -n "$KIND" ] && [ "$KIND" != "null" ]; then
-                    DOC_COUNT=1
-                  fi
-                fi
-                
-                if [ "$DOC_COUNT" -gt 0 ] && [ "$DOC_COUNT" != "0" ]; then
-                  for i in $(seq 0 $((DOC_COUNT - 1))); do
-                    KIND=$(yq eval ".[$i].kind" "$TEMP_FILE" 2>/dev/null | tr -d '"')
-                    
-                    if [ -z "$KIND" ] || [ "$KIND" = "null" ]; then
-                      if [ $DOC_COUNT -eq 1 ]; then
-                        KIND=$(yq eval '.kind' "$TEMP_FILE" 2>/dev/null | tr -d '"')
+                if [ -s "$TEMP_FILE" ]; then
+                  echo "✅ Successfully rendered $overlay_full overlay"
+                  
+                  RENDERED_VALID=0
+                  RENDERED_SKIPPED=0
+                  RENDERED_ERRORS=0
+                  
+                  # Split rendered manifest
+                  csplit -sz "$TEMP_FILE" '/^---/' '{*}' 2>/dev/null || true
+                  
+                  doc_num=0
+                  for chunk in xx*; do
+                    if [ -f "$chunk" ] && [ -s "$chunk" ]; then
+                      KIND=$(yq eval '.kind' "$chunk" 2>/dev/null | tr -d '"' | head -1)
+                      
+                      if [ -n "$KIND" ] && [ "$KIND" != "null" ]; then
+                        if echo "$KIND" | grep -qE "$CUSTOM_RESOURCES"; then
+                          echo "  ℹ️ Document $doc_num - Skipping custom resource: $KIND"
+                          RENDERED_SKIPPED=$((RENDERED_SKIPPED + 1))
+                        else
+                          if kubeconform -strict -summary "$chunk" 2>&1; then
+                            RENDERED_VALID=$((RENDERED_VALID + 1))
+                          else
+                            echo "  ❌ Document $doc_num - Invalid resource: $KIND"
+                            RENDERED_ERRORS=$((RENDERED_ERRORS + 1))
+                          fi
+                        fi
                       fi
+                      
+                      rm -f "$chunk"
+                      doc_num=$((doc_num + 1))
                     fi
-                    
-                    if [ -z "$KIND" ] || [ "$KIND" = "null" ]; then
-                      continue
-                    fi
-                    
-                    case "$KIND" in
-                      ExternalSecret|SecretStore|ClusterSecretStore|PushSecret|DestinationRule|VirtualService|Gateway|PeerAuthentication|AuthorizationPolicy|ServiceEntry|WorkloadEntry|Sidecar|EnvoyFilter|RequestAuthentication|ProxyConfig|WasmPlugin|Telemetry|Application|AppProject|Kustomization)
-                        echo "  ℹ️ Skipping rendered custom resource: $KIND"
-                        RENDERED_SKIPPED=$((RENDERED_SKIPPED + 1))
-                        ;;
-                      *)
-                        if [ $DOC_COUNT -eq 1 ]; then
-                          cp "$TEMP_FILE" /tmp/single.yaml
-                        else
-                          yq eval ".[$i]" "$TEMP_FILE" > /tmp/single.yaml
-                        fi
-                        
-                        if kubeconform -strict -summary /tmp/single.yaml 2>&1; then
-                          RENDERED_VALID=$((RENDERED_VALID + 1))
-                        else
-                          echo "❌ Invalid resource in rendered manifest: $KIND"
-                          RENDERED_ERRORS=$((RENDERED_ERRORS + 1))
-                        fi
-                        rm -f /tmp/single.yaml
-                        ;;
-                    esac
                   done
-                fi
-                
-                echo ""
-                echo "  📊 $overlay_full overlay summary:"
-                echo "    ✅ Valid resources: $RENDERED_VALID"
-                echo "    ⏭️ Skipped CRDs: $RENDERED_SKIPPED"
-                echo "    ❌ Errors: $RENDERED_ERRORS"
-                
-                if [ $RENDERED_ERRORS -gt 0 ]; then
-                  FAILED_OVERLAYS=$((FAILED_OVERLAYS + 1))
+                  
+                  echo ""
+                  echo "  📊 $overlay_full overlay summary:"
+                  echo "    ✅ Valid resources: $RENDERED_VALID"
+                  echo "    ⏭️ Skipped CRDs: $RENDERED_SKIPPED"
+                  echo "    ❌ Errors: $RENDERED_ERRORS"
+                  
+                  if [ $RENDERED_ERRORS -gt 0 ]; then
+                    FAILED_OVERLAYS=$((FAILED_OVERLAYS + 1))
+                  else
+                    VALIDATED_OVERLAYS=$((VALIDATED_OVERLAYS + 1))
+                  fi
                 else
+                  echo "⚠️ Rendered file is empty - no resources to validate"
                   VALIDATED_OVERLAYS=$((VALIDATED_OVERLAYS + 1))
                 fi
               else
@@ -751,6 +733,8 @@ jobs:
           echo "🔍 BASE DIRECTORY VALIDATION"
           echo "========================================="
           
+          CUSTOM_RESOURCES="ExternalSecret|SecretStore|ClusterSecretStore|PushSecret|DestinationRule|VirtualService|Gateway|PeerAuthentication|AuthorizationPolicy|ServiceEntry|WorkloadEntry|Sidecar|EnvoyFilter|RequestAuthentication|ProxyConfig|WasmPlugin|Telemetry|Application|AppProject|Kustomization"
+          
           VALIDATED=0
           SKIPPED=0
           FAILED=0
@@ -762,31 +746,56 @@ jobs:
               continue
             fi
             
-            # Check file content for kind
-            KIND=$(yq eval '.kind' "$file" 2>/dev/null | tr -d '"')
+            # Split multi-document files
+            DOC_COUNT=$(grep -c "^---" "$file" 2>/dev/null || echo "0")
+            DOC_COUNT=$((DOC_COUNT + 1))
             
-            # Skip custom resources
-            case "$KIND" in
-              ExternalSecret|SecretStore|ClusterSecretStore|PushSecret|DestinationRule|VirtualService|Gateway|PeerAuthentication|AuthorizationPolicy|ServiceEntry|WorkloadEntry|Sidecar|EnvoyFilter|RequestAuthentication|ProxyConfig|WasmPlugin|Telemetry|Application|AppProject)
-                echo "⏭️ Skipping $file (custom resource: $KIND)"
-                SKIPPED=$((SKIPPED + 1))
-                continue
-                ;;
-              "")
-                echo "⚠️ Could not determine kind for $file"
-                continue
-                ;;
-            esac
-            
-            # Validate standard resources
-            if kubeconform -strict -summary "$file" 2>&1; then
-              echo "✅ Valid: $file"
-              VALIDATED=$((VALIDATED + 1))
+            if [ "$DOC_COUNT" -eq 1 ]; then
+              KIND=$(yq eval '.kind' "$file" 2>/dev/null | tr -d '"' | head -1)
+              
+              if [ -n "$KIND" ] && [ "$KIND" != "null" ]; then
+                if echo "$KIND" | grep -qE "$CUSTOM_RESOURCES"; then
+                  echo "⏭️ Skipping $file (custom resource: $KIND)"
+                  SKIPPED=$((SKIPPED + 1))
+                else
+                  if kubeconform -strict -summary "$file" 2>&1; then
+                    echo "✅ Valid: $KIND - $file"
+                    VALIDATED=$((VALIDATED + 1))
+                  else
+                    echo "❌ Invalid: $KIND - $file"
+                    FAILED=$((FAILED + 1))
+                  fi
+                fi
+              fi
             else
-              echo "❌ Invalid: $file"
-              FAILED=$((FAILED + 1))
+              echo "📄 Splitting multi-document file: $file"
+              csplit -sz "$file" '/^---/' '{*}' 2>/dev/null || true
+              
+              for chunk in xx*; do
+                if [ -f "$chunk" ] && [ -s "$chunk" ]; then
+                  KIND=$(yq eval '.kind' "$chunk" 2>/dev/null | tr -d '"' | head -1)
+                  
+                  if [ -n "$KIND" ] && [ "$KIND" != "null" ]; then
+                    if echo "$KIND" | grep -qE "$CUSTOM_RESOURCES"; then
+                      echo "  ⏭️ Skipping custom resource: $KIND"
+                      SKIPPED=$((SKIPPED + 1))
+                    else
+                      if kubeconform -strict -summary "$chunk" 2>&1; then
+                        echo "  ✅ Valid: $KIND"
+                        VALIDATED=$((VALIDATED + 1))
+                      else
+                        echo "  ❌ Invalid: $KIND"
+                        FAILED=$((FAILED + 1))
+                      fi
+                    fi
+                  fi
+                  
+                  rm -f "$chunk"
+                fi
+              done
             fi
-          done < <(find k8s/base -name "*.yaml" -o -name "*.yml" 2>/dev/null || echo "")
+            
+          done < <(find k8s/base -name "*.yaml" -o -name "*.yml" 2>/dev/null | sort)
           
           echo ""
           echo "========================================="
@@ -800,7 +809,7 @@ jobs:
             echo "❌ Base directory validation failed"
             exit 1
           fi
-          echo "========================================="
+          echo "✅ Base directory validation passed"
 
       - name: Upload validation reports
         if: always()
@@ -812,16 +821,14 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-      - name: Add PR comment for validation results (optional - may fail without proper permissions)
-        if: always() && github.event.pull_request.number != null && github.token != ''
+      - name: Add PR comment for validation results
+        if: always() && github.event.pull_request.number != null
         continue-on-error: true
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             try {
-              const fs = require('fs');
-              
               let comment = `## 🔍 Kubernetes Validation Results\n\n`;
               comment += `| Check | Status |\n`;
               comment += `|-------|--------|\n`;
@@ -831,7 +838,6 @@ jobs:
               comment += `| Kustomize Overlays | ✅ Validated |\n\n`;
               comment += `**Note:** Custom resources (ExternalSecret, SecretStore, DestinationRule, VirtualService, Gateway, etc.) are intentionally skipped as they are validated by their respective controllers in the cluster.`;
               
-              // Find and update existing comment
               const { data: comments } = await github.rest.issues.listComments({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
