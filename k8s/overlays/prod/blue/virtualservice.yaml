@@ -1,0 +1,36 @@
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: cinevision-blue
+spec:
+  gateways:
+    - cinevision-gateway-blue
+  hosts:
+    - DOMAIN_NAME
+    - api.DOMAIN_NAME
+  http:
+    - match:
+        - uri:
+            prefix: /api
+      route:
+        - destination:
+            host: api-gateway-blue
+            port:
+              number: 80
+          weight: 100
+        - destination:
+            host: api-gateway-green
+            port:
+              number: 80
+          weight: 0
+    - route:
+        - destination:
+            host: frontend-blue
+            port:
+              number: 80
+          weight: 100
+        - destination:
+            host: frontend-green
+            port:
+              number: 80
+          weight: 0

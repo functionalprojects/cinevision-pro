@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cinevision-config
+data:
+  SPRING_PROFILES_ACTIVE: "k8s"
+  EUREKA_HOST: "eureka-server"
+  EUREKA_PORT: "8761"
+  ZIPKIN_HOST: "zipkin.observability.svc.cluster.local"
+  ZIPKIN_PORT: "9411"
+  POSTGRES_HOST: "postgres.endpoint.aws.local"
+  POSTGRES_DB: "cinevision"
+  POSTGRES_PORT: "5432"
+  MONGO_HOST: "documentdb.endpoint.aws.local"
+  MONGO_PORT: "27017"
+  REDIS_HOST: "redis.endpoint.aws.local"
+  REDIS_PORT: "6379"
+  KAFKA_BOOTSTRAP_SERVERS: "msk.bootstrap.aws.local:9094"
+  MAIL_HOST: "smtp.endpoint.aws.local"
+  CINEVISION_STORAGE_POSTER_ENABLED: "true"
+  CINEVISION_STORAGE_POSTER_REGION: "AWS_REGION"
+  CINEVISION_STORAGE_POSTER_BUCKET: "cinevision-movie-assets-ENV"
+  CINEVISION_STORAGE_POSTER_PUBLIC_BASE_URL: "https://movie-assets.DOMAIN_NAME"
+  CINEVISION_STORAGE_POSTER_KEY_PREFIX: "movie-posters"
+  CINEVISION_STORAGE_EMAIL_ARCHIVE_ENABLED: "true"
+  CINEVISION_STORAGE_EMAIL_ARCHIVE_REGION: "AWS_REGION"
+  CINEVISION_STORAGE_EMAIL_ARCHIVE_BUCKET: "cinevision-email-archive-ENV"
+  CINEVISION_STORAGE_EMAIL_ARCHIVE_KEY_PREFIX: "ticket-emails"
