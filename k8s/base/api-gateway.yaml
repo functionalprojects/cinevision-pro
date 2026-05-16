@@ -12,6 +12,7 @@ spec:
       labels:
         app: api-gateway
     spec:
+      serviceAccountName: cinevision-secrets-sa
       containers:
         - name: api-gateway
           image: api-gateway

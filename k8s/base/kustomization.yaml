@@ -5,11 +5,12 @@ resources:
   - namespace.yaml
   - configmap.yaml
   - secrets-serviceaccount.yaml
-  - secretstore.yaml
+  - cluster-secret-store.yaml
   - externalsecret.yaml
   - api-gateway.yaml
   - user-service.yaml
   - movie-service.yaml
   - email-service.yaml
   - eureka-server.yaml
-  - frontend.yaml
+  - istio/gateway.yaml
+  - istio/virtualservice.yaml

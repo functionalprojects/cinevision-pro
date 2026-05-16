@@ -27,9 +27,6 @@ images:
   - name: eureka-server
     newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/cinevision/eureka-server
     newTag: latest
-  - name: frontend
-    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/cinevision/frontend
-    newTag: latest
 patches:
   - path: configmap-patch.yaml
   - path: externalsecret-patch.yaml

@@ -12,6 +12,7 @@ spec:
       labels:
         app: movie-service
     spec:
+      serviceAccountName: cinevision-secrets-sa
       containers:
         - name: movie-service
           image: movie-service
