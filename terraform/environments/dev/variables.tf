@@ -76,7 +76,7 @@ variable "frontend_aliases" {
 }
 variable "acm_certificate_arn" {
   type    = string
-  default = "arn:aws:acm:us-east-1:211026994790:certificate/f8f7f273-7ace-46f4-9b93-14dd90562b0c"
+  default = ""
   validation {
     condition     = !strcontains(var.acm_certificate_arn, "ACCOUNT_ID") && !strcontains(var.acm_certificate_arn, "CERTIFICATE_ID")
     error_message = "acm_certificate_arn still contains  ACCOUNT_ID/CERTIFICATE_ID placeholder."
@@ -93,7 +93,7 @@ variable "node_groups" {
   }))
   default = {
     general = {
-      instance_types = ["t3.medium"]
+      instance_types = ["t3.large"]
       desired_size   = 3
       min_size       = 2
       max_size       = 4
