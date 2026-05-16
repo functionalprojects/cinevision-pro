@@ -94,7 +94,7 @@ variable "node_groups" {
   default = {
     general = {
       instance_types = ["t3.medium"]
-      desired_size   = 2
+      desired_size   = 3
       min_size       = 2
       max_size       = 4
       disk_size      = 50
