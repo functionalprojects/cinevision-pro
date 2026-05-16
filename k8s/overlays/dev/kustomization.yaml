@@ -33,7 +33,7 @@ patches:
   - path: externalsecret-patch.yaml
   - target:
       group: external-secrets.io
-      version: v1beta1
+      version: v1
       kind: ClusterSecretStore
       name: cinevision-secret-store
     patch: |-
