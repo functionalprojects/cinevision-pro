@@ -12,6 +12,7 @@ spec:
       labels:
         app: email-service
     spec:
+      serviceAccountName: cinevision-secrets-sa
       containers:
         - name: email-service
           image: email-service

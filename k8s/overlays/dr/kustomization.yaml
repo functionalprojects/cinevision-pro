@@ -20,9 +20,6 @@ images:
   - name: eureka-server
     newName: ACCOUNT_ID.dkr.ecr.us-west-2.amazonaws.com/cinevision/eureka-server
     newTag: dr-latest
-  - name: frontend
-    newName: ACCOUNT_ID.dkr.ecr.us-west-2.amazonaws.com/cinevision/frontend
-    newTag: dr-latest
 replicas:
   - name: api-gateway
     count: 1
@@ -32,8 +29,15 @@ replicas:
     count: 1
   - name: email-service
     count: 1
-  - name: frontend
-    count: 1
 patches:
   - path: configmap-patch.yaml
   - path: externalsecret-patch.yaml
+  - target:
+      group: external-secrets.io
+      version: v1beta1
+      kind: ClusterSecretStore
+      name: cinevision-secret-store
+    patch: |-
+      - op: replace
+        path: /spec/provider/aws/auth/jwt/serviceAccountRef/namespace
+        value: cinevision-prod-dr

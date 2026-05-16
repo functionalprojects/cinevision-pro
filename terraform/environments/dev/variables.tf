@@ -68,10 +68,10 @@ variable "email_archives_bucket_name" {
 }
 variable "frontend_aliases" {
   type    = list(string)
-  default = ["dev.cinevisionca.link"]
+  default = ["dev.cinevisionca.link", "frontend.dev.cinevisionca.com"]
   validation {
     condition     = alltrue([for a in var.frontend_aliases : !strcontains(a, "DOMAIN_NAME")])
-    error_message = "frontend_aliases contains DOMAIN_NAME placeholder."
+    error_message = "frontend_aliases contains  DOMAIN_NAME placeholder."
   }
 }
 variable "acm_certificate_arn" {
