@@ -1,4 +1,4 @@
-name: Terraform Lifecycle (Apply then Destroy)
+name: Terraform Apply
 
 on:
   push:
@@ -50,7 +50,7 @@ jobs:
   terraform-apply:
     needs: setup
     runs-on: ubuntu-latest
-    environment: ${{ needs.setup.outputs.env }} # Manual approval for apply
+    environment: ${{ needs.setup.outputs.env }}
     
     steps:
       - uses: actions/checkout@v4
@@ -76,42 +76,17 @@ jobs:
           cd terraform/environments/${{ needs.setup.outputs.env }}
           terraform apply -auto-approve -input=false
 
-# --------------------------------
-# 3. Terraform Destroy (Manual Approval Required)
-# --------------------------------
-  terraform-destroy:
-    needs: [setup, terraform-apply]
-    runs-on: ubuntu-latest
-    # Using a specific "destroy" environment for the manual gate
-    environment: 
-      name: ${{ needs.setup.outputs.env }}-destroy
-    
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TERRAFORM_VERSION }}
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Terraform Init
+      - name: Terraform Apply Summary
+        if: always()
         run: |
-          cd terraform/environments/${{ needs.setup.outputs.env }}
-          terraform init -input=false -reconfigure
-
-      - name: Terraform Destroy
-        run: |
-          cd terraform/environments/${{ needs.setup.outputs.env }}
-          terraform destroy -auto-approve -input=false
+          echo "## Terraform Apply Results" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment:** ${{ needs.setup.outputs.env }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Triggered by:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
 
 # --------------------------------
-# 4. Handle Production DR Apply (Parallel to Prod Apply)
+# 3. Handle Production DR Apply
 # --------------------------------
   terraform-apply-dr:
     needs: setup
@@ -121,20 +96,32 @@ jobs:
     
     steps:
       - uses: actions/checkout@v4
+      
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
+          
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
+          
       - name: Terraform Init
         run: |
           cd terraform/environments/prod-dr
           terraform init -input=false -reconfigure
+          
       - name: Terraform Apply
         run: |
           cd terraform/environments/prod-dr
           terraform apply -auto-approve -input=false
+          
+      - name: Terraform Apply DR Summary
+        if: always()
+        run: |
+          echo "## Terraform Apply DR Results" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment:** prod-dr" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
