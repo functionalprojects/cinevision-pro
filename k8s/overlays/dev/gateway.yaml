@@ -15,6 +15,9 @@ spec:
       number: 443
       name: https
       protocol: HTTPS
+    tls:
+      mode: SIMPLE
+      credentialName: cinevision-tls
     hosts:
     - "dev.cinevisionca.link"
     - "api.dev.cinevisionca.link"
