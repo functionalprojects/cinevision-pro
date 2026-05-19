@@ -9,12 +9,12 @@ spec:
       name: http
       protocol: HTTP
     hosts:
-    - "dev.DOMAIN_NAME"
-    - "api.dev.DOMAIN_NAME"
+    - "dev.cinevisionca.link"
+    - "api.dev.cinevisionca.link"
   - port:
       number: 443
       name: https
       protocol: HTTPS
     hosts:
-    - "dev.DOMAIN_NAME"
-    - "api.dev.DOMAIN_NAME"
+    - "dev.cinevisionca.link"
+    - "api.dev.cinevisionca.link"
