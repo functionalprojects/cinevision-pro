@@ -76,7 +76,7 @@ variable "frontend_aliases" {
 }
 variable "acm_certificate_arn" {
   type    = string
-  default = "arn:aws:acm:us-east-1:211026994790:certificate/8f96bfdc-0b7e-44e6-8d68-f16ed5fbb9e4"
+  default = "arn:aws:acm:us-east-1:211026994790:certificate/a122a5f4-43d4-4959-8b7b-c600ae2f6f48"
   validation {
     condition     = !strcontains(var.acm_certificate_arn, "ACCOUNT_ID") && !strcontains(var.acm_certificate_arn, "CERTIFICATE_ID")
     error_message = "acm_certificate_arn still contains  ACCOUNT_ID/CERTIFICATE_ID placeholder."
