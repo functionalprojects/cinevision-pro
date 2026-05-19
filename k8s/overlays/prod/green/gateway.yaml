@@ -3,8 +3,6 @@ kind: Gateway
 metadata:
   name: cinevision-gateway
 spec:
-  selector:
-    istio: ingressgateway
   servers:
     - port:
         number: 80
@@ -13,3 +11,13 @@ spec:
       hosts:
         - DOMAIN_NAME
         - api.DOMAIN_NAME
+    - port:
+        number: 443
+        name: https
+        protocol: HTTPS
+      hosts:
+        - DOMAIN_NAME
+        - api.DOMAIN_NAME
+      tls:
+        mode: SIMPLE
+        credentialName: cinevision-tls

@@ -1,0 +1,8 @@
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: cinevision-vs
+spec:
+  hosts:
+  - "dr.DOMAIN_NAME"
+  - "api.dr.DOMAIN_NAME"

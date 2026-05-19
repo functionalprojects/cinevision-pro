@@ -3,8 +3,8 @@ kind: ConfigMap
 metadata:
   name: cinevision-config
 data:
-  POSTGRES_HOST: "cinevision-dev-postgres.cinevision-dev-postgres.us-east-1.rds.amazonaws.com"
-  MONGO_HOST: "cinevision-dev-docdb.cinevision-dev-docdb.docdb.amazonaws.com"
+  POSTGRES_HOST: "cinevision-dev-postgres.CLUSTER_ID.us-east-1.rds.amazonaws.com"
+  MONGO_HOST: "cinevision-dev-docdb.CLUSTER_ID.docdb.amazonaws.com"
   REDIS_HOST: "cinevision-dev-redis.cache.amazonaws.com"
   KAFKA_BOOTSTRAP_SERVERS: "b-1.dev-msk.amazonaws.com:9094,b-2.dev-msk.amazonaws.com:9094"
   MAIL_HOST: "mailhog.dev.svc.cluster.local"

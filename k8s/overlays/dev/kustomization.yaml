@@ -5,19 +5,19 @@ resources:
   - ../../base
 images:
   - name: api-gateway
-    newName: 211026994790.dkr.ecr.us-east-1.amazonaws.com/cinevision/api-gateway
+    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/cinevision/api-gateway
     newTag: latest
   - name: user-service
-    newName: 211026994790.dkr.ecr.us-east-1.amazonaws.com/cinevision/user-service
+    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/cinevision/user-service
     newTag: latest
   - name: movie-service
-    newName: 211026994790.dkr.ecr.us-east-1.amazonaws.com/cinevision/movie-service
+    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/cinevision/movie-service
     newTag: latest
   - name: email-service
-    newName: 211026994790.dkr.ecr.us-east-1.amazonaws.com/cinevision/email-service
+    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/cinevision/email-service
     newTag: latest
   - name: eureka-server
-    newName: 211026994790.dkr.ecr.us-east-1.amazonaws.com/cinevision/eureka-server
+    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/cinevision/eureka-server
     newTag: latest
 replicas:
   - name: api-gateway
@@ -31,12 +31,6 @@ replicas:
 patches:
   - path: configmap-patch.yaml
   - path: externalsecret-patch.yaml
-  - target:
-      group: external-secrets.io
-      version: v1
-      kind: ClusterSecretStore
-      name: cinevision-secret-store
-    patch: |-
-      - op: replace
-        path: /spec/provider/aws/auth/jwt/serviceAccountRef/namespace
-        value: cinevision-dev
+  - path: secretstore-patch.yaml
+  - path: gateway.yaml
+  - path: virtualservice.yaml
