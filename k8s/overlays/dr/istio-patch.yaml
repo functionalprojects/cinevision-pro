@@ -3,21 +3,27 @@ kind: Gateway
 metadata:
   name: cinevision-gateway
 spec:
-  selector:
-    istio: ingressgateway
   servers:
   - port:
       number: 80
       name: http
       protocol: HTTP
     hosts:
-    - "*"
+    - "dr.DOMAIN_NAME"
+    - "api.dr.DOMAIN_NAME"
   - port:
       number: 443
       name: https
       protocol: HTTPS
     hosts:
-    - "*"
-    tls:
-      mode: SIMPLE
-      credentialName: cinevision-tls
+    - "dr.DOMAIN_NAME"
+    - "api.dr.DOMAIN_NAME"
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: cinevision-vs
+spec:
+  hosts:
+  - "dr.DOMAIN_NAME"
+  - "api.dr.DOMAIN_NAME"

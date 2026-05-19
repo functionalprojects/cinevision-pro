@@ -1,0 +1,18 @@
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: cinevision-vs
+spec:
+  hosts:
+  - "*"
+  gateways:
+  - cinevision-gateway
+  http:
+  - match:
+    - uri:
+        prefix: "/api"
+    route:
+    - destination:
+        host: api-gateway
+        port:
+          number: 80

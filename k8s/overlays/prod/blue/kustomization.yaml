@@ -8,8 +8,6 @@ labels:
     includeSelectors: true
 resources:
   - ../../../base
-  - gateway.yaml
-  - virtualservice.yaml
   - destinationrule.yaml
 images:
   - name: api-gateway
@@ -31,3 +29,5 @@ patches:
   - path: configmap-patch.yaml
   - path: externalsecret-patch.yaml
   - path: secretstore-patch.yaml
+  - path: gateway.yaml
+  - path: virtualservice.yaml

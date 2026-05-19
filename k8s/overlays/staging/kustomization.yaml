@@ -3,7 +3,6 @@ kind: Kustomization
 namespace: cinevision-staging
 resources:
   - ../../base
-  - ingress.yaml
 images:
   - name: api-gateway
     newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/cinevision/api-gateway
@@ -32,12 +31,6 @@ replicas:
 patches:
   - path: configmap-patch.yaml
   - path: externalsecret-patch.yaml
-  - target:
-      group: external-secrets.io
-      version: v1beta1
-      kind: ClusterSecretStore
-      name: cinevision-secret-store
-    patch: |-
-      - op: replace
-        path: /spec/provider/aws/auth/jwt/serviceAccountRef/namespace
-        value: cinevision-staging
+  - path: secretstore-patch.yaml
+  - path: gateway.yaml
+  - path: virtualservice.yaml
