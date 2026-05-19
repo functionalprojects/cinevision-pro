@@ -5,19 +5,19 @@ resources:
   - ../../base
 images:
   - name: api-gateway
-    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/cinevision/api-gateway
+    newName: 211026994790.dkr.ecr.us-east-1.amazonaws.com/cinevision/api-gateway
     newTag: latest
   - name: user-service
-    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/cinevision/user-service
+    newName: 211026994790.dkr.ecr.us-east-1.amazonaws.com/cinevision/user-service
     newTag: latest
   - name: movie-service
-    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/cinevision/movie-service
+    newName: 211026994790.dkr.ecr.us-east-1.amazonaws.com/cinevision/movie-service
     newTag: latest
   - name: email-service
-    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/cinevision/email-service
+    newName: 211026994790.dkr.ecr.us-east-1.amazonaws.com/cinevision/email-service
     newTag: latest
   - name: eureka-server
-    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/cinevision/eureka-server
+    newName: 211026994790.dkr.ecr.us-east-1.amazonaws.com/cinevision/eureka-server
     newTag: latest
 replicas:
   - name: api-gateway
