@@ -196,11 +196,12 @@ pipeline {
           env.DEPLOY_ENABLED = env.CONFIG.deployEnabled.toString()
           env.BUILD_IMAGES = env.CONFIG.buildImages.toString()
           
-          // Critical validation for Dev
-          if (env.TARGET_ENV == 'dev') {
-            if (!env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID || env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID == '****') {
-              error("DEV_CLOUDFRONT_DISTRIBUTION_ID is not properly configured")
-            }
+          // Critical validation for CloudFront distribution IDs
+          if (['dev', 'staging', 'prod'].contains(env.TARGET_ENV)) {
+              def distId = env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID
+              if (!distId || distId == '****') {
+                  error("${env.TARGET_ENV.toUpperCase()}_CLOUDFRONT_DISTRIBUTION_ID is not properly configured")
+              }
           }
           
           echo "🚀 Pipeline initialized for ${env.TARGET_ENV}"
@@ -428,16 +429,15 @@ pipeline {
 def sendSlackNotification(String buildStatus) {
     def colorCode = buildStatus == 'SUCCESSFUL' ? 'good' : (buildStatus == 'FAILED' ? 'danger' : 'warning')
     def emoji = buildStatus == 'SUCCESSFUL' ? '✅' : (buildStatus == 'FAILED' ? '❌' : '⚠️')
-    
-    slackSend(
-        token: env.SLACK_TOKEN,
-        color: colorCode,
-        message: "${emoji} *CineVision Build ${buildStatus}* \n" +
-                 "*Project:* ${env.JOB_NAME} \n" +
-                 "*Build:* <${env.BUILD_URL}|#${env.BUILD_NUMBER}> \n" +
-                 "*Branch:* ${env.BRANCH_NAME} \n" +
-                 "*Environment:* ${env.TARGET_ENV ?: 'N/A'} \n" +
-                 "*Commit:* ${env.GIT_COMMIT_SHORT ?: 'N/A'} \n" +
-                 "*Services:* ${env.CHANGED_SERVICES ?: 'All'}"
-    )
+        slackSend(
+            tokenCredentialId: 'slack-token',
+            color: colorCode,
+            message: "${emoji} *CineVision Build ${buildStatus}* \n" +
+                     "*Project:* ${env.JOB_NAME} \n" +
+                     "*Build:* <${env.BUILD_URL}|#${env.BUILD_NUMBER}> \n" +
+                     "*Branch:* ${env.BRANCH_NAME} \n" +
+                     "*Environment:* ${env.TARGET_ENV ?: 'N/A'} \n" +
+                     "*Commit:* ${env.GIT_COMMIT_SHORT ?: 'N/A'} \n" +
+                     "*Services:* ${env.CHANGED_SERVICES ?: 'All'}"
+        )
 }
