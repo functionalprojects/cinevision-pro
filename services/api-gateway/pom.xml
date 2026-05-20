@@ -24,7 +24,7 @@
     </properties>
 
     <dependencies>
-        <!-- Spring Cloud Gateway  -->
+        <!-- Spring Cloud Gateway -->
         <dependency>
             <groupId>org.springframework.cloud</groupId>
             <artifactId>spring-cloud-starter-gateway</artifactId>
