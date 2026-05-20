@@ -276,7 +276,11 @@ pipeline {
     }
     
     stage('📂 GitOps Manifest Update') {
-      when { expression { env.DEPLOY_ENABLED == 'true' && env.CHANGED_SERVICES != null && env.CHANGED_SERVICES != '' } }
+      when { 
+        expression { 
+          env.DEPLOY_ENABLED == 'true' && env.CHANGED_SERVICES != null && env.CHANGED_SERVICES != '' 
+        } 
+      }
       steps {
         script {
           def overlay = env.CONFIG.kustomizeOverlay
@@ -301,7 +305,11 @@ pipeline {
     }
     
     stage('🌐 Frontend Deployment') {
-      when { expression { env.DEPLOY_ENABLED == 'true' && env.CHANGED_SERVICES != null && env.CHANGED_SERVICES.contains('frontend') } }
+      when { 
+        expression { 
+          env.DEPLOY_ENABLED == 'true' && env.CHANGED_SERVICES != null && env.CHANGED_SERVICES.contains('frontend') 
+        } 
+      }
       steps {
         script {
           withAWS(credentials: env.CONFIG.awsCredentialsId, region: env.AWS_REGION) {
