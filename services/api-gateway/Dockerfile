@@ -1,7 +1,7 @@
 FROM maven:3.9.9-eclipse-temurin-21 AS build
 WORKDIR /workspace
 
-# Copy standalone POM and download dependencies  for caching
+# Copy standalone POM and download dependencies for caching
 COPY pom.xml .
 RUN mvn dependency:go-offline -B
 
