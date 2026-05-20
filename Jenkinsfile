@@ -168,6 +168,7 @@ pipeline {
     // Git Configuration
     GITHUB_REPO = 'functionalprojects/cinevision-pro'
     GITHUB_TOKEN = credentials('github-token')
+    SLACK_TOKEN = credentials('slack-token')
   }
   
   stages {
@@ -409,9 +410,13 @@ pipeline {
   post {
     success { sendSlackNotification('SUCCESSFUL') }
     failure { sendSlackNotification('FAILED') }
-    always { 
-      junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml, **/test-results/**/*.xml'
-      cleanWs() 
+    always {
+      script {
+        node {
+          junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml, **/test-results/**/*.xml'
+        }
+      }
+      cleanWs()
     }
   }
 }
@@ -425,6 +430,7 @@ def sendSlackNotification(String buildStatus) {
     def emoji = buildStatus == 'SUCCESSFUL' ? '✅' : (buildStatus == 'FAILED' ? '❌' : '⚠️')
     
     slackSend(
+        token: env.SLACK_TOKEN,
         color: colorCode,
         message: "${emoji} *CineVision Build ${buildStatus}* \n" +
                  "*Project:* ${env.JOB_NAME} \n" +
