@@ -169,6 +169,8 @@ pipeline {
     GITHUB_REPO = 'functionalprojects/cinevision-pro'
     GITHUB_TOKEN = credentials('github-token')
     SLACK_TOKEN = credentials('slack-token')
+    SLACK_CHANNEL = '#cinevision-ci-alerts'
+    SLACK_TEAM_DOMAIN = 'cinevision-gitops-app'
   }
   
   stages {
@@ -431,6 +433,8 @@ def sendSlackNotification(String buildStatus) {
     def emoji = buildStatus == 'SUCCESSFUL' ? '✅' : (buildStatus == 'FAILED' ? '❌' : '⚠️')
         slackSend(
             tokenCredentialId: 'slack-token',
+            channel: env.SLACK_CHANNEL,
+            teamDomain: env.SLACK_TEAM_DOMAIN,
             color: colorCode,
             message: "${emoji} *CineVision Build ${buildStatus}* \n" +
                      "*Project:* ${env.JOB_NAME} \n" +
