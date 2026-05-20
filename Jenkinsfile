@@ -4,12 +4,12 @@
 // ============================================
 
 def serviceMap = [
-  'api-gateway'  : [path: 'services/api-gateway',   type: 'maven', image: 'api-gateway'],
-  'user-service' : [path: 'services/userService',   type: 'maven', image: 'user-service'],
-  'movie-service': [path: 'services/movieService',  type: 'maven', image: 'movie-service'],
-  'email-service': [path: 'services/emailService',  type: 'maven', image: 'email-service'],
-  'eureka-server': [path: 'services/eureka-server', type: 'maven', image: 'eureka-server'],
-  'frontend'     : [path: 'services/frontend',      type: 'node',  image: 'frontend']
+  'api-gateway'  : [path: 'services/api-gateway',   type: 'maven', image: 'api-gateway', sonarProject: 'cinevision-api-gateway'],
+  'user-service' : [path: 'services/userService',   type: 'maven', image: 'user-service', sonarProject: 'cinevision-user-service'],
+  'movie-service': [path: 'services/movieService',  type: 'maven', image: 'movie-service', sonarProject: 'cinevision-movie-service'],
+  'email-service': [path: 'services/emailService',  type: 'maven', image: 'email-service', sonarProject: 'cinevision-email-service'],
+  'eureka-server': [path: 'services/eureka-server', type: 'maven', image: 'eureka-server', sonarProject: 'cinevision-eureka-server'],
+  'frontend'     : [path: 'services/frontend',      type: 'node',  image: 'frontend', sonarProject: 'cinevision-frontend']
 ]
 
 def detectChangedServices() {
@@ -189,6 +189,10 @@ pipeline {
     // Slack
     SLACK_TOKEN = credentials('slack-token')
     SLACK_CHANNEL = '#cinevision-ci-alerts'
+    
+    // SonarCloud
+    SONAR_HOST_URL = 'https://sonarcloud.io'
+    SONAR_ORGANIZATION = 'functionalprojects'
   }
 
   stages {
@@ -264,28 +268,63 @@ pipeline {
         stage('SCA: Dependency Check') {
 
           steps {
-
-            dependencyCheck(
-              additionalArguments: '--format HTML --format XML --out .',
-              odcInstallation: 'DP-Check'
-            )
-
-            dependencyCheckPublisher(
-              pattern: 'dependency-check-report.xml'
-            )
+            script {
+              // Run dependency check only on changed services or all if no changes detected
+              def servicesToScan = detectChangedServices()
+              
+              servicesToScan.each { serviceName ->
+                def meta = serviceMap[serviceName]
+                dir(meta.path) {
+                  dependencyCheck(
+                    additionalArguments: '--format HTML --format XML --out .',
+                    odcInstallation: 'DP-Check'
+                  )
+                  
+                  dependencyCheckPublisher(
+                    pattern: 'dependency-check-report.xml'
+                  )
+                }
+              }
+            }
           }
         }
 
         stage('SAST: SonarCloud') {
 
           steps {
-
-            withSonarQubeEnv('sonarcloud') {
-              sh 'mvn sonar:sonar'
-            }
-
-            timeout(time: 10, unit: 'MINUTES') {
-              waitForQualityGate abortPipeline: true
+            script {
+              def servicesToScan = detectChangedServices()
+              def sonarBranches = [:]
+              
+              servicesToScan.each { serviceName ->
+                def meta = serviceMap[serviceName]
+                
+                sonarBranches[serviceName] = {
+                  dir(meta.path) {
+                    withSonarQubeEnv('sonarcloud') {
+                      def sonarCommand = """
+                        mvn sonar:sonar \
+                          -Dsonar.projectKey=${meta.sonarProject} \
+                          -Dsonar.organization=${env.SONAR_ORGANIZATION} \
+                          -Dsonar.host.url=${env.SONAR_HOST_URL} \
+                          -Dsonar.branch.name=${env.BRANCH_NAME} \
+                          -Dsonar.projectVersion=${env.IMAGE_TAG}
+                      """
+                      sh sonarCommand
+                    }
+                  }
+                }
+              }
+              
+              parallel sonarBranches
+              
+              // Wait for quality gates for changed services
+              servicesToScan.each { serviceName ->
+                def meta = serviceMap[serviceName]
+                timeout(time: 10, unit: 'MINUTES') {
+                  waitForQualityGate abortPipeline: true
+                }
+              }
             }
           }
         }
@@ -691,7 +730,7 @@ pipeline {
 
         junit(
           allowEmptyResults: true,
-          testResults: '**/target/surefire-reports/*.xml, **/test-results/**/*.xml'
+          testResults: '**/target/surefire-reports/*.xml, **/test-results/**/*.xml, **/dependency-check-report.xml'
         )
 
         cleanWs()
@@ -735,18 +774,23 @@ def sendSlackNotification(scriptContext, String buildStatus) {
   def changedServices =
     scriptContext.env.CHANGED_SERVICES ?: 'All'
 
-  slackSend(
-    tokenCredentialId: 'slack-token',
-    channel: scriptContext.env.SLACK_CHANNEL,
-    color: colorCode,
-    failOnError: false,
-    message:
-      "${emoji} *CineVision Build ${buildStatus}*\n" +
-      "*Project:* ${jobName}\n" +
-      "*Build:* <${buildUrl}|#${buildNumber}>\n" +
-      "*Branch:* ${branchName}\n" +
-      "*Environment:* ${targetEnv}\n" +
-      "*Commit:* ${gitCommitShort}\n" +
-      "*Services:* ${changedServices}"
-  )
+  // Use try-catch to handle Slack notification failures gracefully
+  try {
+    slackSend(
+      tokenCredentialId: 'slack-token',
+      channel: scriptContext.env.SLACK_CHANNEL,
+      color: colorCode,
+      failOnError: false,
+      message:
+        "${emoji} *CineVision Build ${buildStatus}*\n" +
+        "*Project:* ${jobName}\n" +
+        "*Build:* <${buildUrl}|#${buildNumber}>\n" +
+        "*Branch:* ${branchName}\n" +
+        "*Environment:* ${targetEnv}\n" +
+        "*Commit:* ${gitCommitShort}\n" +
+        "*Services:* ${changedServices}"
+    )
+  } catch (Exception e) {
+    echo "Warning: Slack notification failed - ${e.message}"
+  }
 }
