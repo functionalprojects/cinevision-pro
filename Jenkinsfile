@@ -34,7 +34,7 @@ def getEnvironmentConfig() {
   def branch = env.BRANCH_NAME
   
   // Production (Mainline)
-  if (branch == 'main' || branch == 'master' || branch.startsWith('hotfix/')) {
+  if (branch == 'main' || branch == 'master' || (branch != null && branch.startsWith('hotfix/'))) {
     return [
       env: 'prod',
       awsAccountId: env.PROD_AWS_ACCOUNT_ID,
@@ -59,7 +59,7 @@ def getEnvironmentConfig() {
   }
   
   // Staging (Release Candidates)
-  if (branch.startsWith('release/')) {
+  if (branch != null && branch.startsWith('release/')) {
     return [
       env: 'staging',
       awsAccountId: env.STAGING_AWS_ACCOUNT_ID,
@@ -276,12 +276,13 @@ pipeline {
     }
     
     stage('📂 GitOps Manifest Update') {
-      when { expression { env.DEPLOY_ENABLED == 'true' && env.CHANGED_SERVICES } }
+      when { expression { env.DEPLOY_ENABLED == 'true' && env.CHANGED_SERVICES != null && env.CHANGED_SERVICES != '' } }
       steps {
         script {
           def overlay = env.CONFIG.kustomizeOverlay
-          env.CHANGED_SERVICES.split(',').each { serviceName ->
-            if (serviceName != 'frontend') {
+          def changedServicesList = env.CHANGED_SERVICES.split(',')
+          changedServicesList.each { serviceName ->
+            if (serviceName != 'frontend' && serviceMap.containsKey(serviceName)) {
               def meta = serviceMap[serviceName]
               def fullImageName = "${env.CURRENT_ECR_REGISTRY}/${env.IMAGE_NAMESPACE}/${meta.image}"
               sh "kustomize edit set image ${meta.image}=${fullImageName}:${env.IMAGE_TAG} -k ${overlay}"
@@ -300,7 +301,7 @@ pipeline {
     }
     
     stage('🌐 Frontend Deployment') {
-      when { expression { env.DEPLOY_ENABLED == 'true' && env.CHANGED_SERVICES?.contains('frontend') } }
+      when { expression { env.DEPLOY_ENABLED == 'true' && env.CHANGED_SERVICES != null && env.CHANGED_SERVICES.contains('frontend') } }
       steps {
         script {
           withAWS(credentials: env.CONFIG.awsCredentialsId, region: env.AWS_REGION) {
@@ -315,12 +316,12 @@ pipeline {
               }
               
               // Invalidation for Movie Posters
-              if (env.CHANGED_SERVICES?.contains('movie-service') && env.CURRENT_POSTER_CLOUDFRONT_ID && env.CURRENT_POSTER_CLOUDFRONT_ID != '****') {
+              if (env.CHANGED_SERVICES != null && env.CHANGED_SERVICES.contains('movie-service') && env.CURRENT_POSTER_CLOUDFRONT_ID && env.CURRENT_POSTER_CLOUDFRONT_ID != '****') {
                 sh "aws cloudfront create-invalidation --distribution-id ${env.CURRENT_POSTER_CLOUDFRONT_ID} --paths '/*'"
               }
               
               // Invalidation for Email Archives
-              if (env.CHANGED_SERVICES?.contains('email-service') && env.CURRENT_ARCHIVE_CLOUDFRONT_ID && env.CURRENT_ARCHIVE_CLOUDFRONT_ID != '****') {
+              if (env.CHANGED_SERVICES != null && env.CHANGED_SERVICES.contains('email-service') && env.CURRENT_ARCHIVE_CLOUDFRONT_ID && env.CURRENT_ARCHIVE_CLOUDFRONT_ID != '****') {
                 sh "aws cloudfront create-invalidation --distribution-id ${env.CURRENT_ARCHIVE_CLOUDFRONT_ID} --paths '/*'"
               }
             }
@@ -402,24 +403,34 @@ pipeline {
     stage('🔖 Release Tagging') {
       when { expression { env.TARGET_ENV == 'prod' } }
       steps {
-        sh """
-          git tag -a release-${env.IMAGE_TAG} -m "Release ${env.IMAGE_TAG}"
-          git push https://${env.GITHUB_TOKEN}@github.com/${env.GITHUB_REPO}.git release-${env.IMAGE_TAG}
-        """
+        script {
+          sh """
+            git tag -a release-${env.IMAGE_TAG} -m "Release ${env.IMAGE_TAG}"
+            git push https://${env.GITHUB_TOKEN}@github.com/${env.GITHUB_REPO}.git release-${env.IMAGE_TAG}
+          """
+        }
       }
     }
   }
   
   post {
-    success { sendSlackNotification('SUCCESSFUL') }
-    failure { sendSlackNotification('FAILED') }
+    success { 
+      script {
+        sendSlackNotification('SUCCESSFUL')
+      }
+    }
+    failure { 
+      script {
+        sendSlackNotification('FAILED')
+      }
+    }
     always {
       script {
         node {
           junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml, **/test-results/**/*.xml'
         }
+        cleanWs()
       }
-      cleanWs()
     }
   }
 }
@@ -431,17 +442,27 @@ pipeline {
 def sendSlackNotification(String buildStatus) {
     def colorCode = buildStatus == 'SUCCESSFUL' ? 'good' : (buildStatus == 'FAILED' ? 'danger' : 'warning')
     def emoji = buildStatus == 'SUCCESSFUL' ? '✅' : (buildStatus == 'FAILED' ? '❌' : '⚠️')
-        slackSend(
-            tokenCredentialId: 'slack-token',
-            channel: env.SLACK_CHANNEL,
-            teamDomain: env.SLACK_TEAM_DOMAIN,
-            color: colorCode,
-            message: "${emoji} *CineVision Build ${buildStatus}* \n" +
-                     "*Project:* ${env.JOB_NAME} \n" +
-                     "*Build:* <${env.BUILD_URL}|#${env.BUILD_NUMBER}> \n" +
-                     "*Branch:* ${env.BRANCH_NAME} \n" +
-                     "*Environment:* ${env.TARGET_ENV ?: 'N/A'} \n" +
-                     "*Commit:* ${env.GIT_COMMIT_SHORT ?: 'N/A'} \n" +
-                     "*Services:* ${env.CHANGED_SERVICES ?: 'All'}"
-        )
+    
+    // Safely access environment variables with null checks
+    def jobName = env.JOB_NAME ?: 'Unknown Job'
+    def buildNumber = env.BUILD_NUMBER ?: 'N/A'
+    def buildUrl = env.BUILD_URL ?: '#'
+    def branchName = env.BRANCH_NAME ?: 'Unknown Branch'
+    def targetEnv = env.TARGET_ENV ?: 'N/A'
+    def gitCommitShort = env.GIT_COMMIT_SHORT ?: 'N/A'
+    def changedServices = env.CHANGED_SERVICES ?: 'All'
+    
+    slackSend(
+        tokenCredentialId: 'slack-token',
+        channel: env.SLACK_CHANNEL,
+        teamDomain: env.SLACK_TEAM_DOMAIN,
+        color: colorCode,
+        message: "${emoji} *CineVision Build ${buildStatus}* \n" +
+                 "*Project:* ${jobName} \n" +
+                 "*Build:* <${buildUrl}|#${buildNumber}> \n" +
+                 "*Branch:* ${branchName} \n" +
+                 "*Environment:* ${targetEnv} \n" +
+                 "*Commit:* ${gitCommitShort} \n" +
+                 "*Services:* ${changedServices}"
+    )
 }
