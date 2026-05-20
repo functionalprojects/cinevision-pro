@@ -198,6 +198,9 @@ pipeline {
           env.DEPLOY_ENABLED = env.CONFIG.deployEnabled.toString()
           env.BUILD_IMAGES = env.CONFIG.buildImages.toString()
           
+          // Initialize CHANGED_SERVICES as empty string
+          env.CHANGED_SERVICES = ''
+          
           // Critical validation for CloudFront distribution IDs
           if (['dev', 'staging', 'prod'].contains(env.TARGET_ENV)) {
               def distId = env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID
@@ -434,9 +437,7 @@ pipeline {
     }
     always {
       script {
-        node {
-          junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml, **/test-results/**/*.xml'
-        }
+        junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml, **/test-results/**/*.xml'
         cleanWs()
       }
     }
