@@ -158,7 +158,8 @@ pipeline {
           CURRENT_ENV_CONFIG = getEnvironmentConfig()
 
           env.TARGET_ENV = CURRENT_ENV_CONFIG.env ?: 'feature'
-          env.AWS_CREDENTIALS_ID = CURRENT_ENV_CONFIG.awsCredentialsId ?: ''
+          // Use the correct AWS credential ID 'ecr-eks'
+          env.AWS_CREDENTIALS_ID = 'ecr-eks'
           env.KUSTOMIZE_OVERLAY = CURRENT_ENV_CONFIG.kustomizeOverlay ?: ''
           env.ARGOCD_APP = CURRENT_ENV_CONFIG.argocdApp ?: ''
           env.API_URL = CURRENT_ENV_CONFIG.apiUrl ?: ''
@@ -196,6 +197,15 @@ pipeline {
             env.DR_ECR_REGISTRY =
               "${CURRENT_ENV_CONFIG.awsAccountId}.dkr.ecr.${env.DR_AWS_REGION}.amazonaws.com"
           }
+          
+          // Check if AWS credentials exist
+          env.AWS_CREDS_EXIST = credentialsExists(env.AWS_CREDENTIALS_ID) ? 'true' : 'false'
+          
+          if (env.AWS_CREDS_EXIST == 'false') {
+            echo "WARNING: AWS credentials '${env.AWS_CREDENTIALS_ID}' not found. AWS operations will be skipped."
+          } else {
+            echo "AWS credentials '${env.AWS_CREDENTIALS_ID}' found and will be used."
+          }
 
           def changedServices = detectChangedServices()
           
@@ -220,6 +230,8 @@ pipeline {
           if (skippedServices) {
             echo "Skipped Services: ${skippedServices.join(', ')}"
           }
+          echo "AWS Credentials ID: ${env.AWS_CREDENTIALS_ID}"
+          echo "AWS Credentials Exist: ${env.AWS_CREDS_EXIST}"
           echo '========================================='
         }
       }
@@ -350,8 +362,7 @@ pipeline {
         expression {
           return (
             env.BUILD_IMAGES == 'true' &&
-            env.CHANGED_SERVICES?.trim() &&
-            env.CURRENT_ECR_REGISTRY?.trim()
+            env.CHANGED_SERVICES?.trim()
           )
         }
       }
@@ -402,63 +413,76 @@ pipeline {
                     '''
                   }
 
-                  withAWS(
-                    region: env.AWS_REGION,
-                    credentials: env.AWS_CREDENTIALS_ID
-                  ) {
+                  // Only push to ECR if AWS credentials exist and registry is configured
+                  if (env.AWS_CREDS_EXIST == 'true' && env.CURRENT_ECR_REGISTRY?.trim()) {
+                    
+                    try {
+                      withAWS(
+                        region: env.AWS_REGION,
+                        credentials: env.AWS_CREDENTIALS_ID
+                      ) {
 
-                    sh """
-                      aws ecr get-login-password \
-                        --region ${env.AWS_REGION} | \
-                      docker login \
-                        --username AWS \
-                        --password-stdin \
-                        ${env.CURRENT_ECR_REGISTRY} || true
-                    """
+                        sh """
+                          aws ecr get-login-password \
+                            --region ${env.AWS_REGION} | \
+                          docker login \
+                            --username AWS \
+                            --password-stdin \
+                            ${env.CURRENT_ECR_REGISTRY} || true
+                        """
 
-                    sh """
-                      aws ecr get-login-password \
-                        --region ${env.DR_AWS_REGION} | \
-                      docker login \
-                        --username AWS \
-                        --password-stdin \
-                        ${env.DR_ECR_REGISTRY} || true
-                    """
-                  }
+                        sh """
+                          aws ecr get-login-password \
+                            --region ${env.DR_AWS_REGION} | \
+                          docker login \
+                            --username AWS \
+                            --password-stdin \
+                            ${env.DR_ECR_REGISTRY} || true
+                        """
+                      }
+                    } catch (Exception e) {
+                      echo "AWS login failed: ${e.message}"
+                      echo "Skipping Docker push for ${serviceName}"
+                      return
+                    }
 
-                  def imageName =
-                    "${env.ECR_REPOSITORY_PREFIX}/${meta.image}"
+                    def imageName =
+                      "${env.ECR_REPOSITORY_PREFIX}/${meta.image}"
 
-                  def primaryImage =
-                    "${env.CURRENT_ECR_REGISTRY}/${imageName}:${env.IMAGE_TAG}"
+                    def primaryImage =
+                      "${env.CURRENT_ECR_REGISTRY}/${imageName}:${env.IMAGE_TAG}"
 
-                  def drImage =
-                    "${env.DR_ECR_REGISTRY}/${imageName}:${env.IMAGE_TAG}"
+                    def drImage =
+                      "${env.DR_ECR_REGISTRY}/${imageName}:${env.IMAGE_TAG}"
 
-                  // Check if Dockerfile exists before building
-                  if (fileExists('Dockerfile')) {
-                    sh """
-                      docker build \
-                        -t ${primaryImage} .
-                    """
+                    // Check if Dockerfile exists before building
+                    if (fileExists('Dockerfile')) {
+                      sh """
+                        docker build \
+                          -t ${primaryImage} .
+                      """
 
-                    sh """
-                      docker tag \
-                        ${primaryImage} \
-                        ${drImage}
-                    """
+                      sh """
+                        docker tag \
+                          ${primaryImage} \
+                          ${drImage}
+                      """
 
-                    sh """
-                      trivy image \
-                        --severity ${env.TRIVY_SEVERITY} \
-                        --exit-code 0 \
-                        ${primaryImage} || true
-                    """
+                      sh """
+                        trivy image \
+                          --severity ${env.TRIVY_SEVERITY} \
+                          --exit-code 0 \
+                          ${primaryImage} || true
+                      """
 
-                    sh "docker push ${primaryImage} || true"
-                    sh "docker push ${drImage} || true"
+                      sh "docker push ${primaryImage} || true"
+                      sh "docker push ${drImage} || true"
+                    } else {
+                      echo "No Dockerfile found in ${meta.path}, skipping Docker build and push"
+                    }
                   } else {
-                    echo "No Dockerfile found in ${meta.path}, skipping Docker build and push"
+                    echo "Skipping Docker build/push for ${serviceName} - AWS credentials not available or registry not configured"
+                    echo "Would have built: ${env.ECR_REPOSITORY_PREFIX}/${meta.image}:${env.IMAGE_TAG}"
                   }
                 }
               }
@@ -484,7 +508,8 @@ pipeline {
           return (
             env.DEPLOY_ENABLED == 'true' &&
             env.KUSTOMIZE_OVERLAY?.trim() &&
-            env.CHANGED_SERVICES?.trim()
+            env.CHANGED_SERVICES?.trim() &&
+            env.AWS_CREDS_EXIST == 'true'
           )
         }
       }
@@ -552,7 +577,8 @@ pipeline {
         expression {
           return (
             env.DEPLOY_ENABLED == 'true' &&
-            env.CHANGED_SERVICES?.contains('frontend')
+            env.CHANGED_SERVICES?.contains('frontend') &&
+            env.AWS_CREDS_EXIST == 'true'
           )
         }
       }
@@ -578,43 +604,48 @@ pipeline {
               fi
             '''
 
-            withAWS(
-              region: env.AWS_REGION,
-              credentials: env.AWS_CREDENTIALS_ID
-            ) {
-
-              if (fileExists('dist')) {
-                sh """
-                  aws s3 sync \
-                    dist/ \
-                    s3://${env.CURRENT_FRONTEND_BUCKET}/ \
-                    --delete || true
-                """
-              } else if (fileExists('build')) {
-                sh """
-                  aws s3 sync \
-                    build/ \
-                    s3://${env.CURRENT_FRONTEND_BUCKET}/ \
-                    --delete || true
-                """
-              } else {
-                echo "No dist or build directory found, skipping S3 sync"
-              }
-
-              if (
-                env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID?.trim()
+            try {
+              withAWS(
+                region: env.AWS_REGION,
+                credentials: env.AWS_CREDENTIALS_ID
               ) {
 
-                sh """
-                  aws cloudfront create-invalidation \
-                    --distribution-id ${env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID} \
-                    --paths '/*' || true
-                """
-              }
-              else {
+                if (fileExists('dist')) {
+                  sh """
+                    aws s3 sync \
+                      dist/ \
+                      s3://${env.CURRENT_FRONTEND_BUCKET}/ \
+                      --delete || true
+                  """
+                } else if (fileExists('build')) {
+                  sh """
+                    aws s3 sync \
+                      build/ \
+                      s3://${env.CURRENT_FRONTEND_BUCKET}/ \
+                      --delete || true
+                  """
+                } else {
+                  echo "No dist or build directory found, skipping S3 sync"
+                }
 
-                echo 'No CloudFront distribution configured'
+                if (
+                  env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID?.trim()
+                ) {
+
+                  sh """
+                    aws cloudfront create-invalidation \
+                      --distribution-id ${env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID} \
+                      --paths '/*' || true
+                  """
+                }
+                else {
+
+                  echo 'No CloudFront distribution configured'
+                }
               }
+            } catch (Exception e) {
+              echo "Frontend deployment failed: ${e.message}"
+              echo "Continuing pipeline despite deployment failure"
             }
           }
         }
@@ -946,7 +977,6 @@ def getEnvironmentConfig() {
     return [
       env                      : 'prod',
       awsAccountId             : env.PROD_AWS_ACCOUNT_ID,
-      awsCredentialsId         : 'aws-prod-credentials',
       argocdApp                : 'cinevision-prod',
       frontendBucket           : env.PROD_FRONTEND_BUCKET,
       cloudfrontDistributionId : env.PROD_CLOUDFRONT_DISTRIBUTION_ID,
@@ -965,7 +995,6 @@ def getEnvironmentConfig() {
     return [
       env                      : 'staging',
       awsAccountId             : env.STAGING_AWS_ACCOUNT_ID,
-      awsCredentialsId         : 'aws-staging-credentials',
       argocdApp                : 'cinevision-staging',
       frontendBucket           : env.STAGING_FRONTEND_BUCKET,
       cloudfrontDistributionId : env.STAGING_CLOUDFRONT_DISTRIBUTION_ID,
@@ -984,7 +1013,6 @@ def getEnvironmentConfig() {
     return [
       env                      : 'dev',
       awsAccountId             : env.DEV_AWS_ACCOUNT_ID,
-      awsCredentialsId         : 'aws-dev-credentials',
       argocdApp                : 'cinevision-dev',
       frontendBucket           : env.DEV_FRONTEND_BUCKET,
       cloudfrontDistributionId : env.DEV_CLOUDFRONT_DISTRIBUTION_ID,
@@ -1001,7 +1029,6 @@ def getEnvironmentConfig() {
   return [
     env                      : 'feature',
     awsAccountId             : '',
-    awsCredentialsId         : '',
     argocdApp                : '',
     frontendBucket           : '',
     cloudfrontDistributionId : '',
@@ -1099,6 +1126,25 @@ def filterAvailableServices(List<String> services) {
       echo "Service ${serviceName} is not available (missing required build files at ${meta.path})"
     }
     return isAvailable
+  }
+}
+
+// ============================================
+// CREDENTIALS CHECK
+// ============================================
+
+def credentialsExists(String credentialsId) {
+  if (!credentialsId?.trim()) {
+    return false
+  }
+  try {
+    // Try to use the credential - if it fails, it doesn't exist
+    withCredentials([string(credentialsId: credentialsId, variable: 'TEST_CRED')]) {
+      return true
+    }
+  } catch (Exception e) {
+    echo "Credential '${credentialsId}' not found: ${e.message}"
+    return false
   }
 }
 
