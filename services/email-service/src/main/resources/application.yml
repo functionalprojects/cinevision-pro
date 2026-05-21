@@ -1,0 +1,65 @@
+server:
+  port: ${SERVER_PORT:8083}
+
+spring:
+  application:
+    name: email-service
+  freemarker:
+    template-loader-path: classpath:/templates/
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: ${KAFKA_EMAIL_GROUP:email-service}
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: '*'
+        spring.json.type.mapping: event:com.kaankaplan.emailService.dto.EmailMessageKafkaDto
+    topic:
+      name: ${KAFKA_EMAIL_TOPIC:email-topics}
+  mail:
+    host: ${MAIL_HOST:localhost}
+    port: ${MAIL_PORT:1025}
+    username: ${MAIL_USERNAME:}
+    password: ${MAIL_PASSWORD:}
+    properties:
+      mail.smtp.auth: false
+      mail.smtp.starttls.enable: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  tracing:
+    sampling:
+      probability: 1.0
+  zipkin:
+    tracing:
+      endpoint: http://${ZIPKIN_HOST:localhost}:${ZIPKIN_PORT:9411}/api/v2/spans
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://${EUREKA_USERNAME:eureka}:${EUREKA_PASSWORD:password}@${EUREKA_HOST:localhost}:${EUREKA_PORT:8761}/eureka/
+    fetch-registry: true
+    register-with-eureka: true
+  instance:
+    prefer-ip-address: true
+
+cinevision:
+  storage:
+    email-archive:
+      enabled: ${CINEVISION_STORAGE_EMAIL_ARCHIVE_ENABLED:false}
+      bucket: ${CINEVISION_STORAGE_EMAIL_ARCHIVE_BUCKET:}
+      region: ${CINEVISION_STORAGE_EMAIL_ARCHIVE_REGION:us-east-1}
+      endpoint: ${CINEVISION_STORAGE_EMAIL_ARCHIVE_ENDPOINT:}
+      access-key: ${CINEVISION_STORAGE_EMAIL_ARCHIVE_ACCESS_KEY:}
+      secret-key: ${CINEVISION_STORAGE_EMAIL_ARCHIVE_SECRET_KEY:}
+      path-style-access-enabled: ${CINEVISION_STORAGE_EMAIL_ARCHIVE_PATH_STYLE_ACCESS_ENABLED:false}
+      key-prefix: ${CINEVISION_STORAGE_EMAIL_ARCHIVE_KEY_PREFIX:ticket-emails}
