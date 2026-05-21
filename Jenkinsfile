@@ -1,6 +1,6 @@
 // ============================================
 // CINEVISION ENTERPRISE CI/CD PIPELINE
-// HARDENED VERSION - DISASTER RECOVERY DISABLED
+// HARDENED VERSION - FULLY FIXED
 // ============================================
 
 import groovy.transform.Field
@@ -209,7 +209,7 @@ pipeline {
           }
 
           // Check if GitHub token exists
-          env.GITHUB_TOKEN_EXISTS = githubCredentialExists() ? 'true' : 'false'
+          env.GITHUB_TOKEN_EXISTS = credentialExists('github-token') ? 'true' : 'false'
           
           if (env.GITHUB_TOKEN_EXISTS == 'false') {
             echo "WARNING: GitHub token 'github-token' not found. Git operations will be skipped."
@@ -516,7 +516,7 @@ pipeline {
     }
 
     // ============================================
-    // GITOPS MANIFEST UPDATE - FIXED PERMISSIONS
+    // GITOPS MANIFEST UPDATE - FIXED with GitHub Token
     // ============================================
 
     stage('GitOps Manifest Update') {
@@ -573,8 +573,8 @@ pipeline {
               }
             }
 
-          // Use withCredentials that works with UsernamePasswordCredentials
-          withCredentials([[$class: 'UsernamePasswordMultiBinding', credentialsId: 'github-token', usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD']]) {
+          // FIXED: Use GitHub token with proper authentication
+          withCredentials([string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN')]) {
             sh """
               git config user.email 'jenkins@cinevision.com'
               git config user.name 'Jenkins CI'
@@ -585,10 +585,8 @@ pipeline {
               if ! git diff --cached --quiet; then
                 git commit -m '[CI] Update image tags ${env.IMAGE_TAG}'
                 
-                # Push to the repository
-                git push \
-                  https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/${env.GITHUB_REPO}.git \
-                  HEAD:${env.BRANCH_NAME}
+                # Push using GitHub token
+                git push https://x-access-token:\${GITHUB_TOKEN}@github.com/${env.GITHUB_REPO}.git HEAD:${env.BRANCH_NAME}
               else
                 echo "No changes to commit"
               fi
@@ -837,7 +835,7 @@ pipeline {
     }
 
     // ============================================
-    // RELEASE TAGGING - FIXED PERMISSIONS
+    // RELEASE TAGGING - FIXED with GitHub Token
     // ============================================
 
     stage('Release Tagging') {
@@ -854,10 +852,10 @@ pipeline {
 
       steps {
         script {
-          withCredentials([[$class: 'UsernamePasswordMultiBinding', credentialsId: 'github-token', usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD']]) {
+          withCredentials([string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN')]) {
             sh """
               git tag -a release-${env.IMAGE_TAG} -m 'Release ${env.IMAGE_TAG}'
-              git push https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/${env.GITHUB_REPO}.git --tags
+              git push https://x-access-token:\${GITHUB_TOKEN}@github.com/${env.GITHUB_REPO}.git --tags
             """
           }
         }
@@ -1084,17 +1082,6 @@ def awsCredentialsExist() {
     }
   } catch (Exception e) {
     echo "AWS credentials '${env.AWS_CREDENTIALS_ID}' not found or invalid: ${e.message}"
-    return false
-  }
-}
-
-def githubCredentialExists() {
-  try {
-    withCredentials([[$class: 'UsernamePasswordMultiBinding', credentialsId: 'github-token', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PASS']]) {
-      return true
-    }
-  } catch (Exception e) {
-    echo "GitHub token 'github-token' not found: ${e.message}"
     return false
   }
 }
