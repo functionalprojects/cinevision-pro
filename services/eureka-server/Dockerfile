@@ -5,7 +5,7 @@ WORKDIR /workspace
 COPY pom.xml .
 RUN mvn dependency:go-offline -B
 
-# Copy source code
+# Copy source  code
 COPY src ./src
 
 # Build packaging
