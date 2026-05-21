@@ -324,7 +324,7 @@ pipeline {
                           -Dsonar.projectKey=${meta.sonarProject} \
                           -Dsonar.organization=${env.SONAR_ORGANIZATION} \
                           -Dsonar.host.url=${env.SONAR_HOST_URL} \
-                          -Dsonar.coverage.exclusions=**/test/**,\**/tests/** \
+                          -Dsonar.coverage.exclusions='**/test/**,**/tests/**' \
                           -Dsonar.qualitygate.wait=false || true
                       """
                     }
