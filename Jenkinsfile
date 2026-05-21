@@ -1,6 +1,6 @@
 // ============================================
 // CINEVISION ENTERPRISE MULTI-REGION CI/CD PIPELINE
-// PRODUCTION-HARDENED VERSION
+// PRODUCTION HARDENED VERSION
 // ============================================
 
 import groovy.transform.Field
@@ -28,7 +28,11 @@ pipeline {
     timestamps()
     disableConcurrentBuilds()
     skipDefaultCheckout()
-    timeout(time: 120, unit: 'MINUTES')
+
+    timeout(
+      time: 120,
+      unit: 'MINUTES'
+    )
 
     buildDiscarder(
       logRotator(
@@ -133,6 +137,10 @@ pipeline {
     PROD_EMAIL_ARCHIVES_BUCKET = 'prod-cinevision-prod-email-archives'
   }
 
+  // ============================================
+  // STAGES
+  // ============================================
+
   stages {
 
     // ============================================
@@ -161,8 +169,11 @@ pipeline {
           env.RUN_INTEGRATION_TESTS = CURRENT_ENV_CONFIG.runIntegrationTests.toString()
           env.RUN_PERFORMANCE_TESTS = CURRENT_ENV_CONFIG.runPerformanceTests.toString()
 
-          env.CURRENT_FRONTEND_BUCKET = CURRENT_ENV_CONFIG.frontendBucket ?: ''
-          env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID = CURRENT_ENV_CONFIG.cloudfrontDistributionId ?: ''
+          env.CURRENT_FRONTEND_BUCKET =
+            CURRENT_ENV_CONFIG.frontendBucket ?: ''
+
+          env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID =
+            CURRENT_ENV_CONFIG.cloudfrontDistributionId ?: ''
 
           env.GIT_COMMIT = sh(
             script: 'git rev-parse HEAD',
@@ -174,7 +185,8 @@ pipeline {
             returnStdout: true
           ).trim()
 
-          env.IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT_SHORT}"
+          env.IMAGE_TAG =
+            "${env.BUILD_NUMBER}-${env.GIT_COMMIT_SHORT}"
 
           if (CURRENT_ENV_CONFIG.awsAccountId?.trim()) {
 
@@ -187,7 +199,8 @@ pipeline {
 
           def changedServices = detectChangedServices()
 
-          env.CHANGED_SERVICES = changedServices.join(',')
+          env.CHANGED_SERVICES =
+            changedServices.join(',')
 
           echo '========================================='
           echo "Environment: ${env.TARGET_ENV}"
@@ -215,7 +228,7 @@ pipeline {
       parallel {
 
         // ============================================
-        // OWASP DEPENDENCY CHECK
+        // DEPENDENCY CHECK
         // ============================================
 
         stage('Dependency Check') {
@@ -355,7 +368,8 @@ pipeline {
                   ) {
 
                     sh """
-                      aws ecr get-login-password --region ${env.AWS_REGION} | \
+                      aws ecr get-login-password \
+                        --region ${env.AWS_REGION} | \
                       docker login \
                         --username AWS \
                         --password-stdin \
@@ -363,7 +377,8 @@ pipeline {
                     """
 
                     sh """
-                      aws ecr get-login-password --region ${env.DR_AWS_REGION} | \
+                      aws ecr get-login-password \
+                        --region ${env.DR_AWS_REGION} | \
                       docker login \
                         --username AWS \
                         --password-stdin \
@@ -380,9 +395,16 @@ pipeline {
                   def drImage =
                     "${env.DR_ECR_REGISTRY}/${imageName}:${env.IMAGE_TAG}"
 
-                  sh "docker build -t ${primaryImage} ."
+                  sh """
+                    docker build \
+                      -t ${primaryImage} .
+                  """
 
-                  sh "docker tag ${primaryImage} ${drImage}"
+                  sh """
+                    docker tag \
+                      ${primaryImage} \
+                      ${drImage}
+                  """
 
                   sh """
                     trivy image \
@@ -403,7 +425,7 @@ pipeline {
     }
 
     // ============================================
-    // GITOPS UPDATE
+    // GITOPS MANIFEST UPDATE
     // ============================================
 
     stage('GitOps Manifest Update') {
@@ -441,7 +463,7 @@ pipeline {
 
                 sh """
                   kustomize edit set image \
-                  ${meta.image}=${env.CURRENT_ECR_REGISTRY}/${env.ECR_REPOSITORY_PREFIX}/${meta.image}:${env.IMAGE_TAG}
+                    ${meta.image}=${env.CURRENT_ECR_REGISTRY}/${env.ECR_REPOSITORY_PREFIX}/${meta.image}:${env.IMAGE_TAG}
                 """
               }
             }
@@ -462,7 +484,9 @@ pipeline {
               git diff --cached --quiet || \
               git commit -m '[CI] Update image tags ${env.IMAGE_TAG}'
 
-              git push https://${GITHUB_TOKEN}@github.com/${env.GITHUB_REPO}.git HEAD:${env.BRANCH_NAME}
+              git push \
+                https://${GITHUB_TOKEN}@github.com/${env.GITHUB_REPO}.git \
+                HEAD:${env.BRANCH_NAME}
             """
           }
         }
@@ -499,16 +523,28 @@ pipeline {
           ) {
 
             sh """
-              aws s3 sync dist/ s3://${env.CURRENT_FRONTEND_BUCKET}/ --delete
+              aws s3 sync \
+                dist/ \
+                s3://${env.CURRENT_FRONTEND_BUCKET}/ \
+                --delete
             """
 
-            if (env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID?.trim()) {
+            script {
 
-              sh """
-                aws cloudfront create-invalidation \
-                  --distribution-id ${env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID} \
-                  --paths '/*'
-              """
+              if (
+                env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID?.trim()
+              ) {
+
+                sh """
+                  aws cloudfront create-invalidation \
+                    --distribution-id ${env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID} \
+                    --paths '/*'
+                """
+              }
+              else {
+
+                echo 'No CloudFront distribution configured'
+              }
             }
           }
         }
@@ -588,6 +624,10 @@ pipeline {
 
       parallel {
 
+        // ============================================
+        // SMOKE TESTS
+        // ============================================
+
         stage('Smoke Tests') {
 
           steps {
@@ -611,6 +651,10 @@ pipeline {
             }
           }
         }
+
+        // ============================================
+        // INTEGRATION TESTS
+        // ============================================
 
         stage('Integration Tests') {
 
@@ -642,6 +686,10 @@ pipeline {
           }
         }
 
+        // ============================================
+        // OWASP ZAP
+        // ============================================
+
         stage('OWASP ZAP') {
 
           steps {
@@ -657,6 +705,10 @@ pipeline {
           }
         }
 
+        // ============================================
+        // PERFORMANCE TESTS
+        // ============================================
+
         stage('Performance Tests') {
 
           when {
@@ -669,7 +721,9 @@ pipeline {
 
             script {
 
-              if (fileExists('tests/performance/load-test.js')) {
+              if (
+                fileExists('tests/performance/load-test.js')
+              ) {
 
                 dir('tests/performance') {
 
@@ -710,21 +764,25 @@ pipeline {
 
       steps {
 
-        withCredentials([
-          string(
-            credentialsId: 'github-token',
-            variable: 'GITHUB_TOKEN'
-          )
-        ]) {
+        script {
 
-          sh """
-            git tag -a release-${env.IMAGE_TAG} \
-              -m 'Release ${env.IMAGE_TAG}'
+          withCredentials([
+            string(
+              credentialsId: 'github-token',
+              variable: 'GITHUB_TOKEN'
+            )
+          ]) {
 
-            git push \
-              https://${GITHUB_TOKEN}@github.com/${env.GITHUB_REPO}.git \
-              --tags
-          """
+            sh """
+              git tag \
+                -a release-${env.IMAGE_TAG} \
+                -m 'Release ${env.IMAGE_TAG}'
+
+              git push \
+                https://${GITHUB_TOKEN}@github.com/${env.GITHUB_REPO}.git \
+                --tags
+            """
+          }
         }
       }
     }
@@ -768,11 +826,6 @@ pipeline {
 
       script {
 
-        // ============================================
-        // SAFE JUNIT
-        // FIXES MissingContextVariableException
-        // ============================================
-
         if (fileExists('.')) {
 
           junit(
@@ -794,19 +847,19 @@ pipeline {
             allowEmptyArchive: true
           )
         }
-      }
 
-      cleanWs(
-        deleteDirs: true,
-        disableDeferredWipeout: true,
-        notFailBuild: true
-      )
+        cleanWs(
+          deleteDirs: true,
+          disableDeferredWipeout: true,
+          notFailBuild: true
+        )
+      }
     }
   }
 }
 
 // ============================================
-// ENVIRONMENT CONFIG
+// ENVIRONMENT CONFIGURATION
 // ============================================
 
 def getEnvironmentConfig() {
@@ -820,74 +873,74 @@ def getEnvironmentConfig() {
   ) {
 
     return [
-      env                        : 'prod',
-      awsAccountId               : env.PROD_AWS_ACCOUNT_ID,
-      awsCredentialsId           : 'aws-prod-credentials',
-      argocdApp                  : 'cinevision-prod',
-      frontendBucket             : env.PROD_FRONTEND_BUCKET,
-      cloudfrontDistributionId   : env.PROD_CLOUDFRONT_DISTRIBUTION_ID,
-      apiUrl                     : env.PROD_API_URL,
-      kustomizeOverlay           : 'k8s/overlays/prod',
-      deployEnabled              : true,
-      approvalRequired           : true,
-      runIntegrationTests        : true,
-      runPerformanceTests        : true,
-      buildImages                : true
+      env                      : 'prod',
+      awsAccountId             : env.PROD_AWS_ACCOUNT_ID,
+      awsCredentialsId         : 'aws-prod-credentials',
+      argocdApp                : 'cinevision-prod',
+      frontendBucket           : env.PROD_FRONTEND_BUCKET,
+      cloudfrontDistributionId : env.PROD_CLOUDFRONT_DISTRIBUTION_ID,
+      apiUrl                   : env.PROD_API_URL,
+      kustomizeOverlay         : 'k8s/overlays/prod',
+      deployEnabled            : true,
+      approvalRequired         : true,
+      runIntegrationTests      : true,
+      runPerformanceTests      : true,
+      buildImages              : true
     ]
   }
 
   if (branch.startsWith('release/')) {
 
     return [
-      env                        : 'staging',
-      awsAccountId               : env.STAGING_AWS_ACCOUNT_ID,
-      awsCredentialsId           : 'aws-staging-credentials',
-      argocdApp                  : 'cinevision-staging',
-      frontendBucket             : env.STAGING_FRONTEND_BUCKET,
-      cloudfrontDistributionId   : env.STAGING_CLOUDFRONT_DISTRIBUTION_ID,
-      apiUrl                     : env.STAGING_API_URL,
-      kustomizeOverlay           : 'k8s/overlays/staging',
-      deployEnabled              : true,
-      approvalRequired           : true,
-      runIntegrationTests        : true,
-      runPerformanceTests        : true,
-      buildImages                : true
+      env                      : 'staging',
+      awsAccountId             : env.STAGING_AWS_ACCOUNT_ID,
+      awsCredentialsId         : 'aws-staging-credentials',
+      argocdApp                : 'cinevision-staging',
+      frontendBucket           : env.STAGING_FRONTEND_BUCKET,
+      cloudfrontDistributionId : env.STAGING_CLOUDFRONT_DISTRIBUTION_ID,
+      apiUrl                   : env.STAGING_API_URL,
+      kustomizeOverlay         : 'k8s/overlays/staging',
+      deployEnabled            : true,
+      approvalRequired         : true,
+      runIntegrationTests      : true,
+      runPerformanceTests      : true,
+      buildImages              : true
     ]
   }
 
   if (branch == 'develop') {
 
     return [
-      env                        : 'dev',
-      awsAccountId               : env.DEV_AWS_ACCOUNT_ID,
-      awsCredentialsId           : 'aws-dev-credentials',
-      argocdApp                  : 'cinevision-dev',
-      frontendBucket             : env.DEV_FRONTEND_BUCKET,
-      cloudfrontDistributionId   : env.DEV_CLOUDFRONT_DISTRIBUTION_ID,
-      apiUrl                     : env.DEV_API_URL,
-      kustomizeOverlay           : 'k8s/overlays/dev',
-      deployEnabled              : true,
-      approvalRequired           : false,
-      runIntegrationTests        : true,
-      runPerformanceTests        : false,
-      buildImages                : true
+      env                      : 'dev',
+      awsAccountId             : env.DEV_AWS_ACCOUNT_ID,
+      awsCredentialsId         : 'aws-dev-credentials',
+      argocdApp                : 'cinevision-dev',
+      frontendBucket           : env.DEV_FRONTEND_BUCKET,
+      cloudfrontDistributionId : env.DEV_CLOUDFRONT_DISTRIBUTION_ID,
+      apiUrl                   : env.DEV_API_URL,
+      kustomizeOverlay         : 'k8s/overlays/dev',
+      deployEnabled            : true,
+      approvalRequired         : false,
+      runIntegrationTests      : true,
+      runPerformanceTests      : false,
+      buildImages              : true
     ]
   }
 
   return [
-    env                        : 'feature',
-    awsAccountId               : '',
-    awsCredentialsId           : '',
-    argocdApp                  : '',
-    frontendBucket             : '',
-    cloudfrontDistributionId   : '',
-    apiUrl                     : '',
-    kustomizeOverlay           : '',
-    deployEnabled              : false,
-    approvalRequired           : false,
-    runIntegrationTests        : false,
-    runPerformanceTests        : false,
-    buildImages                : true
+    env                      : 'feature',
+    awsAccountId             : '',
+    awsCredentialsId         : '',
+    argocdApp                : '',
+    frontendBucket           : '',
+    cloudfrontDistributionId : '',
+    apiUrl                   : '',
+    kustomizeOverlay         : '',
+    deployEnabled            : false,
+    approvalRequired         : false,
+    runIntegrationTests      : false,
+    runPerformanceTests      : false,
+    buildImages              : true
   ]
 }
 
