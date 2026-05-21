@@ -2,35 +2,35 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: cinevision-dev
 resources:
-  - ../../base
+- ../../base
 images:
-  - name: api-gateway
-    newName: 211026994790.dkr.ecr.us-east-1.amazonaws.com/cinevision/api-gateway
-    newTag: latest
-  - name: user-service
-    newName: 211026994790.dkr.ecr.us-east-1.amazonaws.com/cinevision/user-service
-    newTag: latest
-  - name: movie-service
-    newName: 211026994790.dkr.ecr.us-east-1.amazonaws.com/cinevision/movie-service
-    newTag: latest
-  - name: email-service
-    newName: 211026994790.dkr.ecr.us-east-1.amazonaws.com/cinevision/email-service
-    newTag: latest
-  - name: eureka-server
-    newName: 211026994790.dkr.ecr.us-east-1.amazonaws.com/cinevision/eureka-server
-    newTag: latest
+- name: api-gateway
+  newName: 211026994790.dkr.ecr.us-east-1.amazonaws.com/cinevision/api-gateway
+  newTag: 101-c51afd09
+- name: email-service
+  newName: 211026994790.dkr.ecr.us-east-1.amazonaws.com/cinevision/email-service
+  newTag: latest
+- name: eureka-server
+  newName: 211026994790.dkr.ecr.us-east-1.amazonaws.com/cinevision/eureka-server
+  newTag: latest
+- name: movie-service
+  newName: 211026994790.dkr.ecr.us-east-1.amazonaws.com/cinevision/movie-service
+  newTag: latest
+- name: user-service
+  newName: 211026994790.dkr.ecr.us-east-1.amazonaws.com/cinevision/user-service
+  newTag: latest
 replicas:
-  - name: api-gateway
-    count: 1
-  - name: user-service
-    count: 1
-  - name: movie-service
-    count: 1
-  - name: email-service
-    count: 1
+- count: 1
+  name: api-gateway
+- count: 1
+  name: user-service
+- count: 1
+  name: movie-service
+- count: 1
+  name: email-service
 patches:
-  - path: configmap-patch.yaml
-  - path: externalsecret-patch.yaml
-  - path: secretstore-patch.yaml
-  - path: gateway.yaml
-  - path: virtualservice.yaml
+- path: configmap-patch.yaml
+- path: externalsecret-patch.yaml
+- path: secretstore-patch.yaml
+- path: gateway.yaml
+- path: virtualservice.yaml
