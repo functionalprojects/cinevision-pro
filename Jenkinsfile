@@ -158,7 +158,6 @@ pipeline {
           CURRENT_ENV_CONFIG = getEnvironmentConfig()
 
           env.TARGET_ENV = CURRENT_ENV_CONFIG.env ?: 'feature'
-          // Use the correct AWS credential ID 'ecr-eks'
           env.AWS_CREDENTIALS_ID = 'ecr-eks'
           env.KUSTOMIZE_OVERLAY = CURRENT_ENV_CONFIG.kustomizeOverlay ?: ''
           env.ARGOCD_APP = CURRENT_ENV_CONFIG.argocdApp ?: ''
@@ -198,13 +197,20 @@ pipeline {
               "${CURRENT_ENV_CONFIG.awsAccountId}.dkr.ecr.${env.DR_AWS_REGION}.amazonaws.com"
           }
           
-          // Check if AWS credentials exist
-          env.AWS_CREDS_EXIST = credentialsExists(env.AWS_CREDENTIALS_ID) ? 'true' : 'false'
+          // Check if AWS credentials exist (handles both StringCredentials and AmazonWebServicesCredentials)
+          env.AWS_CREDS_EXIST = awsCredentialsExist() ? 'true' : 'false'
           
           if (env.AWS_CREDS_EXIST == 'false') {
-            echo "WARNING: AWS credentials '${env.AWS_CREDENTIALS_ID}' not found. AWS operations will be skipped."
+            echo "WARNING: AWS credentials '${env.AWS_CREDENTIALS_ID}' not found or not accessible. AWS operations will be skipped."
           } else {
             echo "AWS credentials '${env.AWS_CREDENTIALS_ID}' found and will be used."
+          }
+
+          // Check if ArgoCD token exists
+          env.ARGOCD_TOKEN_EXISTS = credentialExists('argocd-token') ? 'true' : 'false'
+          
+          if (env.ARGOCD_TOKEN_EXISTS == 'false') {
+            echo "WARNING: ArgoCD token 'argocd-token' not found. ArgoCD deployment will be skipped."
           }
 
           def changedServices = detectChangedServices()
@@ -232,6 +238,7 @@ pipeline {
           }
           echo "AWS Credentials ID: ${env.AWS_CREDENTIALS_ID}"
           echo "AWS Credentials Exist: ${env.AWS_CREDS_EXIST}"
+          echo "ArgoCD Token Exist: ${env.ARGOCD_TOKEN_EXISTS}"
           echo '========================================='
         }
       }
@@ -417,32 +424,17 @@ pipeline {
                   if (env.AWS_CREDS_EXIST == 'true' && env.CURRENT_ECR_REGISTRY?.trim()) {
                     
                     try {
+                      // Use withAWS which handles AmazonWebServicesCredentials
                       withAWS(
                         region: env.AWS_REGION,
                         credentials: env.AWS_CREDENTIALS_ID
                       ) {
-
-                        sh """
-                          aws ecr get-login-password \
-                            --region ${env.AWS_REGION} | \
-                          docker login \
-                            --username AWS \
-                            --password-stdin \
-                            ${env.CURRENT_ECR_REGISTRY} || true
-                        """
-
-                        sh """
-                          aws ecr get-login-password \
-                            --region ${env.DR_AWS_REGION} | \
-                          docker login \
-                            --username AWS \
-                            --password-stdin \
-                            ${env.DR_ECR_REGISTRY} || true
-                        """
+                        // ECR login is handled automatically by withAWS
+                        echo "AWS credentials loaded successfully for ECR access"
                       }
                     } catch (Exception e) {
-                      echo "AWS login failed: ${e.message}"
-                      echo "Skipping Docker push for ${serviceName}"
+                      echo "AWS credentials failed to load: ${e.message}"
+                      echo "Skipping Docker operations for ${serviceName}"
                       return
                     }
 
@@ -457,6 +449,26 @@ pipeline {
 
                     // Check if Dockerfile exists before building
                     if (fileExists('Dockerfile')) {
+                      
+                      // Manually login to ECR for docker commands
+                      sh """
+                        aws ecr get-login-password \
+                          --region ${env.AWS_REGION} | \
+                        docker login \
+                          --username AWS \
+                          --password-stdin \
+                          ${env.CURRENT_ECR_REGISTRY} || true
+                      """
+
+                      sh """
+                        aws ecr get-login-password \
+                          --region ${env.DR_AWS_REGION} | \
+                        docker login \
+                          --username AWS \
+                          --password-stdin \
+                          ${env.DR_ECR_REGISTRY} || true
+                      """
+
                       sh """
                         docker build \
                           -t ${primaryImage} .
@@ -662,7 +674,8 @@ pipeline {
         expression {
           return (
             env.DEPLOY_ENABLED == 'true' &&
-            env.ARGOCD_APP?.trim()
+            env.ARGOCD_APP?.trim() &&
+            env.ARGOCD_TOKEN_EXISTS == 'true'
           )
         }
       }
@@ -678,34 +691,39 @@ pipeline {
             )
           }
 
-          withCredentials([
-            string(
-              credentialsId: 'argocd-token',
-              variable: 'ARGOCD_TOKEN'
-            )
-          ]) {
+          try {
+            withCredentials([
+              string(
+                credentialsId: 'argocd-token',
+                variable: 'ARGOCD_TOKEN'
+              )
+            ]) {
 
-            sh """
-              argocd login argocd.cinevision.com \
-                --grpc-web \
-                --insecure \
-                --username admin \
-                --password ${ARGOCD_TOKEN} || true
-            """
+              sh """
+                argocd login argocd.cinevision.com \
+                  --grpc-web \
+                  --insecure \
+                  --username admin \
+                  --password ${ARGOCD_TOKEN} || true
+              """
 
-            sh """
-              argocd app sync ${env.ARGOCD_APP} \
-                --grpc-web \
-                --prune \
-                --force || true
-            """
+              sh """
+                argocd app sync ${env.ARGOCD_APP} \
+                  --grpc-web \
+                  --prune \
+                  --force || true
+              """
 
-            sh """
-              argocd app wait ${env.ARGOCD_APP} \
-                --grpc-web \
-                --health \
-                --timeout 600 || true
-            """
+              sh """
+                argocd app wait ${env.ARGOCD_APP} \
+                  --grpc-web \
+                  --health \
+                  --timeout 600 || true
+              """
+            }
+          } catch (Exception e) {
+            echo "ArgoCD deployment failed: ${e.message}"
+            echo "Continuing pipeline despite ArgoCD failure"
           }
         }
       }
@@ -1130,20 +1148,35 @@ def filterAvailableServices(List<String> services) {
 }
 
 // ============================================
-// CREDENTIALS CHECK
+// CREDENTIALS CHECK HELPERS
 // ============================================
 
-def credentialsExists(String credentialsId) {
+def credentialExists(String credentialsId) {
   if (!credentialsId?.trim()) {
     return false
   }
   try {
-    // Try to use the credential - if it fails, it doesn't exist
     withCredentials([string(credentialsId: credentialsId, variable: 'TEST_CRED')]) {
       return true
     }
   } catch (Exception e) {
     echo "Credential '${credentialsId}' not found: ${e.message}"
+    return false
+  }
+}
+
+def awsCredentialsExist() {
+  if (!env.AWS_CREDENTIALS_ID?.trim()) {
+    return false
+  }
+  try {
+    // Try to use withAWS which handles AmazonWebServicesCredentials
+    withAWS(region: env.AWS_REGION, credentials: env.AWS_CREDENTIALS_ID) {
+      // If we get here, credentials exist and are valid
+      return true
+    }
+  } catch (Exception e) {
+    echo "AWS credentials '${env.AWS_CREDENTIALS_ID}' not found or invalid: ${e.message}"
     return false
   }
 }
