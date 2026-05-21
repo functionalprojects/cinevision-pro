@@ -1,7 +1,7 @@
 // ============================================
 // CINEVISION ENTERPRISE CI/CD PIPELINE
 // FULLY HARDENED - ALL ISSUES RESOLVED
-// Version: 2.1.0 - ARGOCD FIXED
+// Version: 2.1.1 - ARGOCD SECRET TEXT FIXED
 // ============================================
 
 import groovy.transform.Field
@@ -202,11 +202,13 @@ pipeline {
             echo "AWS credentials '${env.AWS_CREDENTIALS_ID}' found and will be used."
           }
 
-          // Check if ArgoCD token exists
-          env.ARGOCD_TOKEN_EXISTS = credentialExists('argocd-token') ? 'true' : 'false'
+          // Check if ArgoCD token exists (now as Secret Text)
+          env.ARGOCD_TOKEN_EXISTS = argoCDCredentialExists() ? 'true' : 'false'
           
           if (env.ARGOCD_TOKEN_EXISTS == 'false') {
             echo "WARNING: ArgoCD token 'argocd-token' not found. ArgoCD deployment will be skipped."
+          } else {
+            echo "ArgoCD token found and will be used (Secret Text type)."
           }
 
           // FIXED: Check GitHub token - supports both string and username/password types
@@ -670,7 +672,8 @@ pipeline {
     }
 
     // ============================================
-    // ARGOCD DEPLOYMENT - FULLY FIXED WITH INTERNAL K8S DNS
+    // ARGOCD DEPLOYMENT - FIXED FOR SECRET TEXT CREDENTIALS
+    // Version: Uses Secret Text type instead of StandardUsernamePasswordCredentials
     // ============================================
 
     stage('Deploy & Sync') {
@@ -694,7 +697,7 @@ pipeline {
           }
 
           try {
-            // FIXED: Use internal Kubernetes DNS for ArgoCD
+            // FIXED: Use Secret Text credential type for ArgoCD
             performArgoCDDeployment()
           } catch (Exception e) {
             echo "ArgoCD deployment failed: ${e.message}"
@@ -1048,6 +1051,37 @@ def credentialExists(String credentialsId) {
   }
 }
 
+// NEW: Specific checker for ArgoCD Secret Text credentials
+def argoCDCredentialExists() {
+  if (!env.ARGOCD_APP?.trim()) return false
+  
+  try {
+    // Try Secret Text type first (this is what ArgoCD token should be)
+    withCredentials([string(credentialsId: 'argocd-token', variable: 'ARGOCD_TOKEN')]) {
+      if (env.ARGOCD_TOKEN?.trim()) {
+        echo "ArgoCD Secret Text credential found and validated"
+        return true
+      }
+      return false
+    }
+  } catch (Exception e) {
+    echo "ArgoCD credential 'argocd-token' not found as Secret Text: ${e.message}"
+    
+    // Try username/password type as fallback (for backward compatibility)
+    try {
+      withCredentials([usernamePassword(credentialsId: 'argocd-token', 
+                                        usernameVariable: 'ARGOCD_USER', 
+                                        passwordVariable: 'ARGOCD_PASS')]) {
+        echo "ArgoCD credential found as Username/Password type (will convert to token)"
+        return true
+      }
+    } catch (Exception e2) {
+      echo "ArgoCD credential not found in any format: ${e2.message}"
+      return false
+    }
+  }
+}
+
 def githubCredentialExists() {
   // Try string token first
   try {
@@ -1124,7 +1158,8 @@ def pushToGitHub(boolean isTag = false) {
 }
 
 // ============================================
-// ARGOCD DEPLOYMENT HELPER - UPGRADED WITH INTERNAL K8S DNS
+// ARGOCD DEPLOYMENT HELPER - FIXED FOR SECRET TEXT CREDENTIALS
+// This version properly handles Secret Text type instead of expecting StandardUsernamePasswordCredentials
 // ============================================
 
 def performArgoCDDeployment() {
@@ -1148,10 +1183,21 @@ def performArgoCDDeployment() {
     echo "Could not get ArgoCD cluster IP: ${e.message}"
   }
   
-  // Try string token first
+  // FIXED: Use Secret Text credential type (string) for ArgoCD token
+  // This is the correct approach for ArgoCD tokens stored as Secret Text
   try {
     withCredentials([string(credentialsId: 'argocd-token', variable: 'ARGOCD_TOKEN')]) {
-      // Attempt login with internal DNS
+      
+      // Validate token is not empty
+      if (!env.ARGOCD_TOKEN?.trim()) {
+        echo "WARNING: ArgoCD token is empty. Skipping deployment."
+        return
+      }
+      
+      echo "Successfully retrieved ArgoCD token (Secret Text type)"
+      
+      // Attempt login with internal DNS using the token as password
+      // ArgoCD CLI expects username 'admin' and token as password for token-based auth
       sh """
         echo "Connecting to ArgoCD at ${argoCDServer}:443 using internal DNS..."
         argocd login ${argoCDServer}:443 \
@@ -1161,11 +1207,25 @@ def performArgoCDDeployment() {
           --password ${ARGOCD_TOKEN}
       """
       
+      // Verify login was successful by getting current context
+      def currentContext = sh(
+        script: "argocd context 2>/dev/null | grep -i 'current context' || echo 'unknown'",
+        returnStdout: true
+      ).trim()
+      echo "ArgoCD current context: ${currentContext}"
+      
       // Hard refresh to get latest manifests from Git
       sh """
         echo "Hard refreshing application ${env.ARGOCD_APP}..."
-        argocd app get ${env.ARGOCD_APP} --hard-refresh
+        argocd app get ${env.ARGOCD_APP} --hard-refresh --grpc-web
       """
+      
+      // Get current sync status before sync
+      def currentSyncStatus = sh(
+        script: "argocd app get ${env.ARGOCD_APP} -o json --grpc-web 2>/dev/null | jq -r '.status.sync.status' || echo 'Unknown'",
+        returnStdout: true
+      ).trim()
+      echo "Current sync status before operation: ${currentSyncStatus}"
       
       // Sync the application with force and prune
       sh """
@@ -1189,82 +1249,115 @@ def performArgoCDDeployment() {
       
       // Verify sync status
       def syncStatus = sh(
-        script: "argocd app get ${env.ARGOCD_APP} -o json | jq -r '.status.sync.status'",
+        script: "argocd app get ${env.ARGOCD_APP} -o json --grpc-web | jq -r '.status.sync.status'",
+        returnStdout: true
+      ).trim()
+      
+      // Get health status as well
+      def healthStatus = sh(
+        script: "argocd app get ${env.ARGOCD_APP} -o json --grpc-web | jq -r '.status.health.status'",
         returnStdout: true
       ).trim()
       
       echo "ArgoCD sync status: ${syncStatus}"
+      echo "ArgoCD health status: ${healthStatus}"
       
       if (syncStatus == 'Synced') {
-        echo "✅ Successfully deployed using ArgoCD token (string type) with internal DNS"
+        echo "✅ Successfully deployed using ArgoCD Secret Text token with internal DNS"
+        if (healthStatus == 'Healthy') {
+          echo "✅ Application is healthy"
+        } else {
+          echo "⚠️ Application health status: ${healthStatus}"
+        }
       } else {
         echo "⚠️ ArgoCD sync status is ${syncStatus}, not fully synced"
       }
     }
   } catch (Exception e) {
-    echo "String token with internal DNS failed: ${e.message}"
+    echo "Secret Text token with internal DNS failed: ${e.message}"
     
     // Fallback to cluster IP if DNS doesn't work
     if (argoCDIP) {
       try {
         withCredentials([string(credentialsId: 'argocd-token', variable: 'ARGOCD_TOKEN')]) {
+          echo "Trying ArgoCD cluster IP fallback: ${argoCDIP}:443..."
           sh """
-            echo "Trying ArgoCD cluster IP: ${argoCDIP}:443..."
             argocd login ${argoCDIP}:443 \
               --grpc-web \
               --insecure \
               --username admin \
               --password ${ARGOCD_TOKEN}
             
-            argocd app get ${env.ARGOCD_APP} --hard-refresh
+            argocd app get ${env.ARGOCD_APP} --hard-refresh --grpc-web
             argocd app sync ${env.ARGOCD_APP} --grpc-web --prune --force --replace
             argocd app wait ${env.ARGOCD_APP} --grpc-web --health --timeout 600 --operation
           """
-          echo "✅ Successfully deployed using ArgoCD token with cluster IP"
+          echo "✅ Successfully deployed using ArgoCD Secret Text token with cluster IP fallback"
         }
       } catch (Exception e2) {
         echo "Cluster IP fallback also failed: ${e2.message}"
         
-        // Final fallback: Try username/password type
-        tryFallbackArgoCDLogin()
+        // Final fallback: Try username/password type (for backward compatibility with older credential setups)
+        tryFallbackArgoCDLoginWithUserPass()
       }
     } else {
       // Try username/password type as final fallback
-      tryFallbackArgoCDLogin()
+      tryFallbackArgoCDLoginWithUserPass()
     }
   }
 }
 
-// Helper function for fallback authentication methods
-def tryFallbackArgoCDLogin() {
+// Helper function for fallback authentication using username/password type
+// This is only for backward compatibility with older credential configurations
+def tryFallbackArgoCDLoginWithUserPass() {
   def argoCDServer = "argocd-server.argocd.svc.cluster.local"
   
   try {
     withCredentials([usernamePassword(credentialsId: 'argocd-token', 
                                       usernameVariable: 'ARGOCD_USER', 
                                       passwordVariable: 'ARGOCD_PASS')]) {
+      
+      echo "Trying username/password authentication (legacy fallback) with internal DNS..."
+      
+      // For username/password, we need to use both username and password
       sh """
-        echo "Trying username/password authentication with internal DNS..."
         argocd login ${argoCDServer}:443 \
           --grpc-web \
           --insecure \
           --username ${ARGOCD_USER} \
           --password ${ARGOCD_PASS}
         
-        argocd app get ${env.ARGOCD_APP} --hard-refresh
+        argocd app get ${env.ARGOCD_APP} --hard-refresh --grpc-web
         argocd app sync ${env.ARGOCD_APP} --grpc-web --prune --force --replace
         argocd app wait ${env.ARGOCD_APP} --grpc-web --health --timeout 600 --operation
       """
-      echo "✅ Successfully deployed using ArgoCD token (username/password type) with internal DNS"
+      echo "✅ Successfully deployed using ArgoCD username/password type (legacy fallback)"
     }
   } catch (Exception e3) {
     echo "❌ All ArgoCD authentication methods failed: ${e3.message}"
     echo "Final fallback: Skipping ArgoCD sync. Manual intervention may be required."
     
+    // Provide helpful debugging information
+    echo ""
+    echo "========== ARGOCD DEBUGGING INFORMATION =========="
+    echo "To fix ArgoCD authentication, ensure:"
+    echo "1. Credential 'argocd-token' is configured as 'Secret Text' in Jenkins"
+    echo "2. The token value is a valid ArgoCD API token"
+    echo "3. ArgoCD server is accessible from Jenkins pod"
+    echo ""
+    echo "To generate a new ArgoCD token:"
+    echo "  argocd account generate-token --account <account-name>"
+    echo ""
+    echo "Current ArgoCD application: ${env.ARGOCD_APP}"
+    echo "=================================================="
+    
     // List pods for debugging
     sh """
-      echo "Current pods in namespace:"
-      kubectl get pods -n ${env.ARGOCD_APP} 2>/dev/null || echo "Cannot get pods"
+      echo "Current pods in namespace ${env.ARGOCD_APP}:"
+      kubectl get pods -n ${env.ARGOCD_APP} 2>/dev/null || echo "Cannot get pods in ${env.ARGOCD_APP} namespace"
+      echo ""
+      echo "ArgoCD pods in argocd namespace:"
+      kubectl get pods -n argocd 2>/dev/null || echo "Cannot get ArgoCD pods"
     """
   }
 }
