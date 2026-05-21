@@ -1,14 +1,6 @@
-
 // ============================================
 // CINEVISION ENTERPRISE MULTI-REGION CI/CD PIPELINE
-// Features:
-// - Multi-region deployment (Primary + DR)
-// - SCA / SAST / DAST Security
-// - GitOps + ArgoCD
-// - ECR Multi-Region Replication
-// - CloudFront Invalidation
-// - Smoke / Integration / Performance Tests
-// - Slack Notifications
+// PRODUCTION-HARDENED VERSION
 // ============================================
 
 import groovy.transform.Field
@@ -25,15 +17,30 @@ import groovy.transform.Field
 @Field def CURRENT_ENV_CONFIG = [:]
 
 pipeline {
+
   agent any
+
+  // ============================================
+  // OPTIONS
+  // ============================================
 
   options {
     timestamps()
     disableConcurrentBuilds()
     skipDefaultCheckout()
     timeout(time: 120, unit: 'MINUTES')
-    buildDiscarder(logRotator(numToKeepStr: '30', daysToKeepStr: '30'))
+
+    buildDiscarder(
+      logRotator(
+        numToKeepStr: '30',
+        daysToKeepStr: '30'
+      )
+    )
   }
+
+  // ============================================
+  // ENVIRONMENT
+  // ============================================
 
   environment {
 
@@ -96,19 +103,10 @@ pipeline {
     PROD_ARCHIVE_CLOUDFRONT_ID = credentials('PROD_ARCHIVE_CLOUDFRONT_ID')
 
     // ============================================
-    // DR CLOUDFRONT IDS
-    // ============================================
-
-    DEV_DR_CLOUDFRONT_DISTRIBUTION_ID = credentials('DEV_DR_CLOUDFRONT_DISTRIBUTION_ID')
-    STAGING_DR_CLOUDFRONT_DISTRIBUTION_ID = credentials('STAGING_DR_CLOUDFRONT_DISTRIBUTION_ID')
-    PROD_DR_CLOUDFRONT_DISTRIBUTION_ID = credentials('PROD_DR_CLOUDFRONT_DISTRIBUTION_ID')
-
-    // ============================================
     // TOKENS
     // ============================================
 
     GITHUB_TOKEN = credentials('github-token')
-    SLACK_TOKEN = credentials('slack-token')
 
     // ============================================
     // API URLS
@@ -142,17 +140,21 @@ pipeline {
     // ============================================
 
     stage('Initialization & Checkout') {
+
       steps {
+
         checkout scm
 
         script {
+
           CURRENT_ENV_CONFIG = getEnvironmentConfig()
 
-          env.TARGET_ENV = CURRENT_ENV_CONFIG.env
+          env.TARGET_ENV = CURRENT_ENV_CONFIG.env ?: 'feature'
           env.AWS_CREDENTIALS_ID = CURRENT_ENV_CONFIG.awsCredentialsId ?: ''
           env.KUSTOMIZE_OVERLAY = CURRENT_ENV_CONFIG.kustomizeOverlay ?: ''
           env.ARGOCD_APP = CURRENT_ENV_CONFIG.argocdApp ?: ''
           env.API_URL = CURRENT_ENV_CONFIG.apiUrl ?: ''
+
           env.DEPLOY_ENABLED = CURRENT_ENV_CONFIG.deployEnabled.toString()
           env.BUILD_IMAGES = CURRENT_ENV_CONFIG.buildImages.toString()
           env.APPROVAL_REQUIRED = CURRENT_ENV_CONFIG.approvalRequired.toString()
@@ -161,19 +163,30 @@ pipeline {
 
           env.CURRENT_FRONTEND_BUCKET = CURRENT_ENV_CONFIG.frontendBucket ?: ''
           env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID = CURRENT_ENV_CONFIG.cloudfrontDistributionId ?: ''
-          env.CURRENT_DR_CLOUDFRONT_DISTRIBUTION_ID = CURRENT_ENV_CONFIG.drCloudfrontDistributionId ?: ''
 
-          env.GIT_COMMIT = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
-          env.GIT_COMMIT_SHORT = sh(script: 'git rev-parse --short=8 HEAD', returnStdout: true).trim()
+          env.GIT_COMMIT = sh(
+            script: 'git rev-parse HEAD',
+            returnStdout: true
+          ).trim()
+
+          env.GIT_COMMIT_SHORT = sh(
+            script: 'git rev-parse --short=8 HEAD',
+            returnStdout: true
+          ).trim()
 
           env.IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT_SHORT}"
 
-          if (CURRENT_ENV_CONFIG.awsAccountId) {
-            env.CURRENT_ECR_REGISTRY = "${CURRENT_ENV_CONFIG.awsAccountId}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
-            env.DR_ECR_REGISTRY = "${CURRENT_ENV_CONFIG.awsAccountId}.dkr.ecr.${env.DR_AWS_REGION}.amazonaws.com"
+          if (CURRENT_ENV_CONFIG.awsAccountId?.trim()) {
+
+            env.CURRENT_ECR_REGISTRY =
+              "${CURRENT_ENV_CONFIG.awsAccountId}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
+
+            env.DR_ECR_REGISTRY =
+              "${CURRENT_ENV_CONFIG.awsAccountId}.dkr.ecr.${env.DR_AWS_REGION}.amazonaws.com"
           }
 
           def changedServices = detectChangedServices()
+
           env.CHANGED_SERVICES = changedServices.join(',')
 
           echo '========================================='
@@ -188,68 +201,96 @@ pipeline {
     }
 
     // ============================================
-    // SECURITY
+    // SECURITY & QUALITY
     // ============================================
 
     stage('Security & Quality') {
+
       when {
-        expression { env.CHANGED_SERVICES?.trim() }
+        expression {
+          return env.CHANGED_SERVICES?.trim()
+        }
       }
 
       parallel {
 
+        // ============================================
+        // OWASP DEPENDENCY CHECK
+        // ============================================
+
         stage('Dependency Check') {
+
           steps {
+
             script {
-              def services = env.CHANGED_SERVICES.split(',')
 
-              services.each { serviceName ->
-                def meta = serviceMap[serviceName]
+              env.CHANGED_SERVICES
+                .split(',')
+                .findAll { it?.trim() }
+                .each { serviceName ->
 
-                if (meta?.type == 'maven') {
-                  dir(meta.path) {
-                    sh '''
-                      mvn org.owasp:dependency-check-maven:check \
-                        -Dformat=XML \
-                        -Dformat=HTML \
-                        -DfailOnError=false || true
-                    '''
+                  def meta = serviceMap[serviceName]
+
+                  if (meta?.type == 'maven') {
+
+                    dir(meta.path) {
+
+                      sh '''
+                        mvn org.owasp:dependency-check-maven:check \
+                          -Dformat=XML \
+                          -Dformat=HTML \
+                          -DfailOnError=false || true
+                      '''
+                    }
                   }
                 }
-              }
             }
           }
         }
 
+        // ============================================
+        // SONARCLOUD
+        // ============================================
+
         stage('SonarCloud') {
+
           when {
             expression {
-              env.BRANCH_NAME == 'develop' ||
-              env.BRANCH_NAME == 'main' ||
-              env.BRANCH_NAME.startsWith('release/')
+              return (
+                env.BRANCH_NAME == 'develop' ||
+                env.BRANCH_NAME == 'main' ||
+                env.BRANCH_NAME.startsWith('release/')
+              )
             }
           }
 
           steps {
+
             script {
-              def services = env.CHANGED_SERVICES.split(',')
 
-              services.each { serviceName ->
-                def meta = serviceMap[serviceName]
+              env.CHANGED_SERVICES
+                .split(',')
+                .findAll { it?.trim() }
+                .each { serviceName ->
 
-                if (meta?.type == 'maven') {
-                  dir(meta.path) {
-                    withSonarQubeEnv('sonarcloud') {
-                      sh """
-                        mvn sonar:sonar \
-                          -Dsonar.projectKey=${meta.sonarProject} \
-                          -Dsonar.organization=${env.SONAR_ORGANIZATION} \
-                          -Dsonar.host.url=${env.SONAR_HOST_URL}
-                      """
+                  def meta = serviceMap[serviceName]
+
+                  if (meta?.type == 'maven') {
+
+                    dir(meta.path) {
+
+                      withSonarQubeEnv('sonarcloud') {
+
+                        sh """
+                          mvn sonar:sonar \
+                            -Dsonar.projectKey=${meta.sonarProject} \
+                            -Dsonar.organization=${env.SONAR_ORGANIZATION} \
+                            -Dsonar.host.url=${env.SONAR_HOST_URL}
+                        """
+                      }
                     }
                   }
                 }
-              }
             }
           }
         }
@@ -261,58 +302,83 @@ pipeline {
     // ============================================
 
     stage('Build & Push Images') {
+
       when {
         expression {
-          env.BUILD_IMAGES == 'true' && env.CHANGED_SERVICES?.trim()
+          return (
+            env.BUILD_IMAGES == 'true' &&
+            env.CHANGED_SERVICES?.trim() &&
+            env.CURRENT_ECR_REGISTRY?.trim()
+          )
         }
       }
 
       steps {
+
         script {
+
           def buildStages = [:]
 
-          env.CHANGED_SERVICES.split(',').each { serviceName ->
+          env.CHANGED_SERVICES
+            .split(',')
+            .findAll { it?.trim() }
+            .each { serviceName ->
 
-            def meta = serviceMap[serviceName]
+              def meta = serviceMap[serviceName]
 
-            if (!meta) {
-              return
-            }
+              if (!meta) {
+                return
+              }
 
-            buildStages[serviceName] = {
-
-              stage("Build-${serviceName}") {
+              buildStages[serviceName] = {
 
                 dir(meta.path) {
 
                   if (meta.type == 'maven') {
-                    sh 'mvn clean package -DskipTests=false'
+
+                    sh '''
+                      mvn clean verify
+                    '''
                   }
 
                   if (meta.type == 'node') {
+
                     sh '''
                       npm ci || npm install
                       npm run build
                     '''
                   }
 
-                  withAWS(region: env.AWS_REGION, credentials: env.AWS_CREDENTIALS_ID) {
+                  withAWS(
+                    region: env.AWS_REGION,
+                    credentials: env.AWS_CREDENTIALS_ID
+                  ) {
 
                     sh """
                       aws ecr get-login-password --region ${env.AWS_REGION} | \
-                      docker login --username AWS --password-stdin ${env.CURRENT_ECR_REGISTRY}
+                      docker login \
+                        --username AWS \
+                        --password-stdin \
+                        ${env.CURRENT_ECR_REGISTRY}
                     """
 
                     sh """
                       aws ecr get-login-password --region ${env.DR_AWS_REGION} | \
-                      docker login --username AWS --password-stdin ${env.DR_ECR_REGISTRY}
+                      docker login \
+                        --username AWS \
+                        --password-stdin \
+                        ${env.DR_ECR_REGISTRY}
                     """
                   }
 
-                  def imageName = "${env.ECR_REPOSITORY_PREFIX}/${meta.image}"
+                  def imageName =
+                    "${env.ECR_REPOSITORY_PREFIX}/${meta.image}"
 
-                  def primaryImage = "${env.CURRENT_ECR_REGISTRY}/${imageName}:${env.IMAGE_TAG}"
-                  def drImage = "${env.DR_ECR_REGISTRY}/${imageName}:${env.IMAGE_TAG}"
+                  def primaryImage =
+                    "${env.CURRENT_ECR_REGISTRY}/${imageName}:${env.IMAGE_TAG}"
+
+                  def drImage =
+                    "${env.DR_ECR_REGISTRY}/${imageName}:${env.IMAGE_TAG}"
 
                   sh "docker build -t ${primaryImage} ."
 
@@ -330,7 +396,6 @@ pipeline {
                 }
               }
             }
-          }
 
           parallel buildStages
         }
@@ -342,34 +407,52 @@ pipeline {
     // ============================================
 
     stage('GitOps Manifest Update') {
+
       when {
         expression {
-          env.DEPLOY_ENABLED == 'true' &&
-          env.KUSTOMIZE_OVERLAY?.trim() &&
-          env.CHANGED_SERVICES?.trim()
+          return (
+            env.DEPLOY_ENABLED == 'true' &&
+            env.KUSTOMIZE_OVERLAY?.trim() &&
+            env.CHANGED_SERVICES?.trim()
+          )
         }
       }
 
       steps {
+
         script {
 
-          env.CHANGED_SERVICES.split(',').each { serviceName ->
+          env.CHANGED_SERVICES
+            .split(',')
+            .findAll { it?.trim() }
+            .each { serviceName ->
 
-            if (serviceName == 'frontend') {
-              return
+              if (serviceName == 'frontend') {
+                return
+              }
+
+              def meta = serviceMap[serviceName]
+
+              if (!meta) {
+                return
+              }
+
+              dir(env.KUSTOMIZE_OVERLAY) {
+
+                sh """
+                  kustomize edit set image \
+                  ${meta.image}=${env.CURRENT_ECR_REGISTRY}/${env.ECR_REPOSITORY_PREFIX}/${meta.image}:${env.IMAGE_TAG}
+                """
+              }
             }
 
-            def meta = serviceMap[serviceName]
+          withCredentials([
+            string(
+              credentialsId: 'github-token',
+              variable: 'GITHUB_TOKEN'
+            )
+          ]) {
 
-            dir(env.KUSTOMIZE_OVERLAY) {
-              sh """
-                kustomize edit set image \
-                ${meta.image}=${env.CURRENT_ECR_REGISTRY}/${env.ECR_REPOSITORY_PREFIX}/${meta.image}:${env.IMAGE_TAG}
-              """
-            }
-          }
-
-          withCredentials([string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN')]) {
             sh """
               git config user.email 'jenkins@cinevision.com'
               git config user.name 'Jenkins CI'
@@ -391,36 +474,41 @@ pipeline {
     // ============================================
 
     stage('Frontend Deployment') {
+
       when {
         expression {
-          env.DEPLOY_ENABLED == 'true' &&
-          env.CHANGED_SERVICES.contains('frontend')
+          return (
+            env.DEPLOY_ENABLED == 'true' &&
+            env.CHANGED_SERVICES?.contains('frontend')
+          )
         }
       }
 
       steps {
-        script {
 
-          dir(serviceMap['frontend'].path) {
+        dir(serviceMap['frontend'].path) {
 
-            sh '''
-              npm ci || npm install
-              npm run build
-            '''
+          sh '''
+            npm ci || npm install
+            npm run build
+          '''
 
-            withAWS(region: env.AWS_REGION, credentials: env.AWS_CREDENTIALS_ID) {
+          withAWS(
+            region: env.AWS_REGION,
+            credentials: env.AWS_CREDENTIALS_ID
+          ) {
+
+            sh """
+              aws s3 sync dist/ s3://${env.CURRENT_FRONTEND_BUCKET}/ --delete
+            """
+
+            if (env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID?.trim()) {
 
               sh """
-                aws s3 sync dist/ s3://${env.CURRENT_FRONTEND_BUCKET}/ --delete
+                aws cloudfront create-invalidation \
+                  --distribution-id ${env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID} \
+                  --paths '/*'
               """
-
-              if (env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID?.trim()) {
-                sh """
-                  aws cloudfront create-invalidation \
-                    --distribution-id ${env.CURRENT_CLOUDFRONT_DISTRIBUTION_ID} \
-                    --paths '/*'
-                """
-              }
             }
           }
         }
@@ -432,9 +520,13 @@ pipeline {
     // ============================================
 
     stage('Deploy & Sync') {
+
       when {
         expression {
-          env.DEPLOY_ENABLED == 'true' && env.ARGOCD_APP?.trim()
+          return (
+            env.DEPLOY_ENABLED == 'true' &&
+            env.ARGOCD_APP?.trim()
+          )
         }
       }
 
@@ -443,14 +535,23 @@ pipeline {
         script {
 
           if (env.APPROVAL_REQUIRED == 'true') {
-            input message: "Approve deployment to ${env.TARGET_ENV}?"
+
+            input(
+              message: "Approve deployment to ${env.TARGET_ENV}?"
+            )
           }
 
-          withCredentials([string(credentialsId: 'argocd-token', variable: 'ARGOCD_TOKEN')]) {
+          withCredentials([
+            string(
+              credentialsId: 'argocd-token',
+              variable: 'ARGOCD_TOKEN'
+            )
+          ]) {
 
             sh """
               argocd login argocd.cinevision.com \
                 --grpc-web \
+                --insecure \
                 --username admin \
                 --password ${ARGOCD_TOKEN}
             """
@@ -464,9 +565,9 @@ pipeline {
 
             sh """
               argocd app wait ${env.ARGOCD_APP} \
+                --grpc-web \
                 --health \
-                --timeout 600 \
-                --grpc-web
+                --timeout 600
             """
           }
         }
@@ -474,52 +575,77 @@ pipeline {
     }
 
     // ============================================
-    // VERIFICATION
+    // VERIFICATION & TESTING
     // ============================================
 
     stage('Verification & Testing') {
+
       when {
-        expression { env.DEPLOY_ENABLED == 'true' }
+        expression {
+          return env.DEPLOY_ENABLED == 'true'
+        }
       }
 
       parallel {
 
         stage('Smoke Tests') {
+
           steps {
+
             script {
+
               if (fileExists('tests/smoke')) {
+
                 dir('tests/smoke') {
+
                   sh """
                     npm ci || npm install
                     npm test -- --env=${env.TARGET_ENV}
                   """
                 }
               }
+              else {
+
+                echo 'Smoke tests directory not found'
+              }
             }
           }
         }
 
         stage('Integration Tests') {
+
           when {
-            expression { env.RUN_INTEGRATION_TESTS == 'true' }
+            expression {
+              return env.RUN_INTEGRATION_TESTS == 'true'
+            }
           }
 
           steps {
+
             script {
+
               if (fileExists('tests/integration')) {
+
                 dir('tests/integration') {
+
                   sh """
                     npm ci || npm install
                     BASE_URL=${env.API_URL} npm test
                   """
                 }
               }
+              else {
+
+                echo 'Integration tests directory not found'
+              }
             }
           }
         }
 
         stage('OWASP ZAP') {
+
           steps {
+
             sh """
               docker run --rm \
                 -v \$(pwd):/zap/wrk/:rw \
@@ -532,11 +658,15 @@ pipeline {
         }
 
         stage('Performance Tests') {
+
           when {
-            expression { env.RUN_PERFORMANCE_TESTS == 'true' }
+            expression {
+              return env.RUN_PERFORMANCE_TESTS == 'true'
+            }
           }
 
           steps {
+
             script {
 
               if (fileExists('tests/performance/load-test.js')) {
@@ -554,6 +684,7 @@ pipeline {
                 }
               }
               else {
+
                 echo 'No performance tests found'
               }
             }
@@ -567,23 +698,33 @@ pipeline {
     // ============================================
 
     stage('Release Tagging') {
+
       when {
         expression {
-          env.TARGET_ENV == 'prod' && env.BRANCH_NAME == 'main'
+          return (
+            env.TARGET_ENV == 'prod' &&
+            env.BRANCH_NAME == 'main'
+          )
         }
       }
 
       steps {
-        script {
 
-          withCredentials([string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN')]) {
+        withCredentials([
+          string(
+            credentialsId: 'github-token',
+            variable: 'GITHUB_TOKEN'
+          )
+        ]) {
 
-            sh """
-              git tag -a release-${env.IMAGE_TAG} -m 'Release ${env.IMAGE_TAG}'
+          sh """
+            git tag -a release-${env.IMAGE_TAG} \
+              -m 'Release ${env.IMAGE_TAG}'
 
-              git push https://${GITHUB_TOKEN}@github.com/${env.GITHUB_REPO}.git --tags
-            """
-          }
+            git push \
+              https://${GITHUB_TOKEN}@github.com/${env.GITHUB_REPO}.git \
+              --tags
+          """
         }
       }
     }
@@ -596,131 +737,157 @@ pipeline {
   post {
 
     success {
+
       script {
         sendSlackNotification('SUCCESSFUL')
       }
     }
 
     failure {
+
       script {
         sendSlackNotification('FAILED')
       }
     }
 
     unstable {
+
       script {
         sendSlackNotification('UNSTABLE')
       }
     }
 
     aborted {
+
       script {
         sendSlackNotification('ABORTED')
       }
     }
 
     always {
+
       script {
 
-        junit(
-          allowEmptyResults: true,
-          testResults: '**/target/surefire-reports/*.xml, **/TEST-*.xml'
-        )
+        // ============================================
+        // SAFE JUNIT
+        // FIXES MissingContextVariableException
+        // ============================================
 
-        archiveArtifacts(
-          artifacts: '**/target/*.jar, **/dist/**/*, zap_report.html',
-          allowEmptyArchive: true
-        )
+        if (fileExists('.')) {
 
-        cleanWs()
+          junit(
+            allowEmptyResults: true,
+            keepLongStdio: true,
+            testResults: '''
+              **/target/surefire-reports/*.xml,
+              **/target/failsafe-reports/*.xml,
+              **/TEST-*.xml
+            '''.trim()
+          )
+
+          archiveArtifacts(
+            artifacts: '''
+              **/target/*.jar,
+              **/dist/**/*,
+              zap_report.html
+            '''.trim(),
+            allowEmptyArchive: true
+          )
+        }
       }
+
+      cleanWs(
+        deleteDirs: true,
+        disableDeferredWipeout: true,
+        notFailBuild: true
+      )
     }
   }
 }
 
 // ============================================
-// HELPER FUNCTIONS
+// ENVIRONMENT CONFIG
 // ============================================
 
 def getEnvironmentConfig() {
 
   def branch = env.BRANCH_NAME ?: ''
 
-  if (branch == 'main' || branch == 'master' || branch.startsWith('hotfix/')) {
+  if (
+    branch == 'main' ||
+    branch == 'master' ||
+    branch.startsWith('hotfix/')
+  ) {
 
     return [
-      env                          : 'prod',
-      awsAccountId                 : env.PROD_AWS_ACCOUNT_ID,
-      awsCredentialsId             : 'aws-prod-credentials',
-      argocdApp                    : 'cinevision-prod',
-      frontendBucket               : env.PROD_FRONTEND_BUCKET,
-      cloudfrontDistributionId     : env.PROD_CLOUDFRONT_DISTRIBUTION_ID,
-      drCloudfrontDistributionId   : env.PROD_DR_CLOUDFRONT_DISTRIBUTION_ID,
-      apiUrl                       : env.PROD_API_URL,
-      kustomizeOverlay             : 'k8s/overlays/prod',
-      deployEnabled                : true,
-      approvalRequired             : true,
-      runIntegrationTests          : true,
-      runPerformanceTests          : true,
-      buildImages                  : true
+      env                        : 'prod',
+      awsAccountId               : env.PROD_AWS_ACCOUNT_ID,
+      awsCredentialsId           : 'aws-prod-credentials',
+      argocdApp                  : 'cinevision-prod',
+      frontendBucket             : env.PROD_FRONTEND_BUCKET,
+      cloudfrontDistributionId   : env.PROD_CLOUDFRONT_DISTRIBUTION_ID,
+      apiUrl                     : env.PROD_API_URL,
+      kustomizeOverlay           : 'k8s/overlays/prod',
+      deployEnabled              : true,
+      approvalRequired           : true,
+      runIntegrationTests        : true,
+      runPerformanceTests        : true,
+      buildImages                : true
     ]
   }
 
   if (branch.startsWith('release/')) {
 
     return [
-      env                          : 'staging',
-      awsAccountId                 : env.STAGING_AWS_ACCOUNT_ID,
-      awsCredentialsId             : 'aws-staging-credentials',
-      argocdApp                    : 'cinevision-staging',
-      frontendBucket               : env.STAGING_FRONTEND_BUCKET,
-      cloudfrontDistributionId     : env.STAGING_CLOUDFRONT_DISTRIBUTION_ID,
-      drCloudfrontDistributionId   : env.STAGING_DR_CLOUDFRONT_DISTRIBUTION_ID,
-      apiUrl                       : env.STAGING_API_URL,
-      kustomizeOverlay             : 'k8s/overlays/staging',
-      deployEnabled                : true,
-      approvalRequired             : true,
-      runIntegrationTests          : true,
-      runPerformanceTests          : true,
-      buildImages                  : true
+      env                        : 'staging',
+      awsAccountId               : env.STAGING_AWS_ACCOUNT_ID,
+      awsCredentialsId           : 'aws-staging-credentials',
+      argocdApp                  : 'cinevision-staging',
+      frontendBucket             : env.STAGING_FRONTEND_BUCKET,
+      cloudfrontDistributionId   : env.STAGING_CLOUDFRONT_DISTRIBUTION_ID,
+      apiUrl                     : env.STAGING_API_URL,
+      kustomizeOverlay           : 'k8s/overlays/staging',
+      deployEnabled              : true,
+      approvalRequired           : true,
+      runIntegrationTests        : true,
+      runPerformanceTests        : true,
+      buildImages                : true
     ]
   }
 
   if (branch == 'develop') {
 
     return [
-      env                          : 'dev',
-      awsAccountId                 : env.DEV_AWS_ACCOUNT_ID,
-      awsCredentialsId             : 'aws-dev-credentials',
-      argocdApp                    : 'cinevision-dev',
-      frontendBucket               : env.DEV_FRONTEND_BUCKET,
-      cloudfrontDistributionId     : env.DEV_CLOUDFRONT_DISTRIBUTION_ID,
-      drCloudfrontDistributionId   : env.DEV_DR_CLOUDFRONT_DISTRIBUTION_ID,
-      apiUrl                       : env.DEV_API_URL,
-      kustomizeOverlay             : 'k8s/overlays/dev',
-      deployEnabled                : true,
-      approvalRequired             : false,
-      runIntegrationTests          : true,
-      runPerformanceTests          : false,
-      buildImages                  : true
+      env                        : 'dev',
+      awsAccountId               : env.DEV_AWS_ACCOUNT_ID,
+      awsCredentialsId           : 'aws-dev-credentials',
+      argocdApp                  : 'cinevision-dev',
+      frontendBucket             : env.DEV_FRONTEND_BUCKET,
+      cloudfrontDistributionId   : env.DEV_CLOUDFRONT_DISTRIBUTION_ID,
+      apiUrl                     : env.DEV_API_URL,
+      kustomizeOverlay           : 'k8s/overlays/dev',
+      deployEnabled              : true,
+      approvalRequired           : false,
+      runIntegrationTests        : true,
+      runPerformanceTests        : false,
+      buildImages                : true
     ]
   }
 
   return [
-    env                          : 'feature',
-    awsAccountId                 : '',
-    awsCredentialsId             : '',
-    argocdApp                    : '',
-    frontendBucket               : '',
-    cloudfrontDistributionId     : '',
-    drCloudfrontDistributionId   : '',
-    apiUrl                       : '',
-    kustomizeOverlay             : '',
-    deployEnabled                : false,
-    approvalRequired             : false,
-    runIntegrationTests          : false,
-    runPerformanceTests          : false,
-    buildImages                  : true
+    env                        : 'feature',
+    awsAccountId               : '',
+    awsCredentialsId           : '',
+    argocdApp                  : '',
+    frontendBucket             : '',
+    cloudfrontDistributionId   : '',
+    apiUrl                     : '',
+    kustomizeOverlay           : '',
+    deployEnabled              : false,
+    approvalRequired           : false,
+    runIntegrationTests        : false,
+    runPerformanceTests        : false,
+    buildImages                : true
   ]
 }
 
@@ -741,26 +908,33 @@ def detectChangedServices() {
     returnStdout: true
   ).trim()
 
-  def changedFiles = changedFilesRaw ? changedFilesRaw.split('\n') : []
+  def changedFiles =
+    changedFilesRaw ? changedFilesRaw.split('\n') : []
 
   def changed = []
 
   serviceMap.each { serviceName, meta ->
 
-    if (changedFiles.any { it.startsWith(meta.path + '/') }) {
+    if (
+      changedFiles.any {
+        it.startsWith(meta.path + '/')
+      }
+    ) {
+
       changed << serviceName
     }
   }
 
-  if (changed.isEmpty()) {
-
-    if (
+  if (
+    changed.isEmpty() &&
+    (
       env.BRANCH_NAME == 'develop' ||
       env.BRANCH_NAME == 'main' ||
       env.BRANCH_NAME.startsWith('release/')
-    ) {
-      changed = serviceMap.keySet() as List
-    }
+    )
+  ) {
+
+    changed = serviceMap.keySet() as List
   }
 
   return changed.unique()
@@ -804,6 +978,7 @@ URL: ${env.BUILD_URL}
     )
   }
   catch (Exception ex) {
+
     echo "Slack notification failed: ${ex.message}"
   }
 }
