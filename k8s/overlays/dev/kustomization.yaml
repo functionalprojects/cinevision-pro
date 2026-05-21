@@ -6,7 +6,7 @@ resources:
 images:
 - name: api-gateway
   newName: 211026994790.dkr.ecr.us-east-1.amazonaws.com/cinevision/api-gateway
-  newTag: 153-80c5e421
+  newTag: 154-8828b2c0
 - name: email-service
   newName: 211026994790.dkr.ecr.us-east-1.amazonaws.com/cinevision/email-service
   newTag: latest
