@@ -10,7 +10,7 @@ import groovy.transform.Field
   'api-gateway'  : [path: 'services/api-gateway',   type: 'maven', image: 'api-gateway', sonarProject: 'cinevision-api-gateway', port: 8080],
   'user-service' : [path: 'services/userService',   type: 'maven', image: 'user-service', sonarProject: 'cinevision-user-service', port: 8081],
   'movie-service': [path: 'services/movieService',  type: 'maven', image: 'movie-service', sonarProject: 'cinevision-movie-service', port: 8082],
-  'email-service': [path: 'services/email-service',  type: 'maven', image: 'email-service', sonarProject: 'cinevision-email-service', port: 8083],
+  'email-service': [path: 'services/emailService',  type: 'maven', image: 'email-service', sonarProject: 'cinevision-email-service', port: 8083],
   'eureka-server': [path: 'services/eureka-server', type: 'maven', image: 'eureka-server', sonarProject: 'cinevision-eureka-server', port: 8761],
   'frontend'     : [path: 'services/frontend',      type: 'node',  image: 'frontend', sonarProject: 'cinevision-frontend', port: 3000]
 ]
