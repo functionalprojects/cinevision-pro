@@ -9,4 +9,4 @@ data:
   KAFKA_BOOTSTRAP_SERVERS: "b-2.cinevisiondevmsk.fcua9i.c11.kafka.us-east-1.amazonaws.com:9094,b-1.cinevisiondevmsk.fcua9i.c11.kafka.us-east-1.amazonaws.com:9094,b-3.cinevisiondevmsk.fcua9i.c11.kafka.us-east-1.amazonaws.com:9094"
   MAIL_HOST: "mailhog.dev.svc.cluster.local"
   SPRING_REDIS_TIMEOUT: "30s"
-  MONGO_OPTIONS: "&connectTimeoutMS=30000&socketTimeoutMS=30000"
+  MONGO_OPTIONS: "&tls=true&tlsAllowInvalidHostnames=true&retryWrites=false&connectTimeoutMS=30000&socketTimeoutMS=30000"
