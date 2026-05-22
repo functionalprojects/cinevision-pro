@@ -5,6 +5,6 @@ metadata:
 data:
   POSTGRES_HOST: "cinevision-dev-postgres.cqty8224w3j4.us-east-1.rds.amazonaws.com"
   MONGO_HOST: "cinevision-dev-docdb.cluster-cqty8224w3j4.us-east-1.docdb.amazonaws.com"
-  REDIS_HOST: "cinevision-dev-redis.cache.amazonaws.com"
-  KAFKA_BOOTSTRAP_SERVERS: "b-1.dev-msk.amazonaws.com:9094,b-2.dev-msk.amazonaws.com:9094"
+  REDIS_HOST: "master.cinevision-dev-redis.lzqxbh.use1.cache.amazonaws.com"
+  KAFKA_BOOTSTRAP_SERVERS: "b-2.cinevisiondevmsk.fcua9i.c11.kafka.us-east-1.amazonaws.com:9094,b-1.cinevisiondevmsk.fcua9i.c11.kafka.us-east-1.amazonaws.com:9094,b-3.cinevisiondevmsk.fcua9i.c11.kafka.us-east-1.amazonaws.com:9094"
   MAIL_HOST: "mailhog.dev.svc.cluster.local"
