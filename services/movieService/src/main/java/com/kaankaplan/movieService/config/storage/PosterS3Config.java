@@ -1,4 +1,4 @@
-package com.kaankaplan.emailService.config.storage;
+package com.kaankaplan.movieService.config.storage;
 
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -16,12 +16,12 @@ import software.amazon.awssdk.services.s3.S3Configuration;
 import java.net.URI;
 
 @Configuration
-@EnableConfigurationProperties(EmailArchiveStorageProperties.class)
-public class EmailArchiveS3Config {
+@EnableConfigurationProperties(PosterStorageProperties.class)
+public class PosterS3Config {
 
     @Bean
-    @ConditionalOnProperty(prefix = "cinevision.storage.email-archive", name = "enabled", havingValue = "true")
-    S3Client emailArchiveS3Client(EmailArchiveStorageProperties properties) {
+    @ConditionalOnProperty(prefix = "cinevision.storage.poster", name = "enabled", havingValue = "true")
+    S3Client posterS3Client(PosterStorageProperties properties) {
         String regionStr = properties.getRegion();
         if ("AWS_REGION".equals(regionStr) || !StringUtils.hasText(regionStr)) {
             regionStr = System.getenv("AWS_REGION");

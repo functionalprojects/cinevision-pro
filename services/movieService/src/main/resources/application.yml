@@ -1,0 +1,87 @@
+server:
+  port: ${SERVER_PORT:8081}
+
+spring:
+  application:
+    name: movie-service
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:cinevision}
+    username: ${POSTGRES_USER:postgres}
+    password: ${POSTGRES_PASSWORD:12345}
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: true
+  cache:
+    type: redis
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      properties:
+        spring.json.type.mapping: event:com.kaankaplan.movieService.entity.dto.EmailMessageKafkaDto
+    topic:
+      name: ${KAFKA_EMAIL_TOPIC:email-topics}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  tracing:
+    sampling:
+      probability: 1.0
+  zipkin:
+    tracing:
+      endpoint: http://${ZIPKIN_HOST:localhost}:${ZIPKIN_PORT:9411}/api/v2/spans
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://${EUREKA_USERNAME:eureka}:${EUREKA_PASSWORD:password}@${EUREKA_HOST:localhost}:${EUREKA_PORT:8761}/eureka/
+    fetch-registry: true
+    register-with-eureka: true
+  instance:
+    prefer-ip-address: true
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      movie:
+        register-health-indicator: true
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+  retry:
+    instances:
+      movie:
+        max-attempts: 3
+        wait-duration: 2s
+
+cinevision:
+  mail:
+    from: ${MAIL_FROM:noreply@cinevision.local}
+  storage:
+    poster:
+      enabled: ${CINEVISION_STORAGE_POSTER_ENABLED:false}
+      bucket: ${CINEVISION_STORAGE_POSTER_BUCKET:}
+      region: ${CINEVISION_STORAGE_POSTER_REGION:us-east-1}
+      endpoint: ${CINEVISION_STORAGE_POSTER_ENDPOINT:}
+      access-key: ${CINEVISION_STORAGE_POSTER_ACCESS_KEY:}
+      secret-key: ${CINEVISION_STORAGE_POSTER_SECRET_KEY:}
+      path-style-access-enabled: ${CINEVISION_STORAGE_POSTER_PATH_STYLE_ACCESS_ENABLED:false}
+      public-base-url: ${CINEVISION_STORAGE_POSTER_PUBLIC_BASE_URL:}
+      key-prefix: ${CINEVISION_STORAGE_POSTER_KEY_PREFIX:movie-posters}
